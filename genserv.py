@@ -4403,6 +4403,18 @@ def ReadSettingsFromFile():
         "disableoutagecheck",
     ]
 
+    ConfigSettings["suppress_initial_notify"] = [
+        "boolean",
+        "Suppress Initial Startup Alerts",
+        18,
+        True,
+        "",
+        "",
+        GENMON_CONFIG,
+        GENMON_SECTION,
+        "suppress_initial_notify",
+    ]
+
     if GStartInfo["SetGenTime"]:
         ConfigSettings["syncdst"] = [
             "boolean",

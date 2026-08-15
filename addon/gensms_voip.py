@@ -296,6 +296,7 @@ if __name__ == "__main__":
             loglocation=loglocation,
             console=console,
             config=config,
+            configfilepath=ConfigFilePath,
         )
 
         while True:

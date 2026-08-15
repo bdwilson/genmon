@@ -221,6 +221,7 @@ if __name__ == "__main__":  #
             log=log,
             loglocation=loglocation,
             console=console,
+            configfilepath=ConfigFilePath,
         )
 
         while True:
