@@ -324,7 +324,7 @@ class GenNotify(MyCommon):
                         else:
                             FuelOK = False
                         if self.notify_warning:
-                            self.ProcessEventData(
+                            self.MaybeProcessEventData(
                                 "FUELWARNING", FuelOK, self.LastFuelWarningStatus
                             )
                             self.LastFuelWarningStatus = FuelOK
