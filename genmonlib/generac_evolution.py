@@ -54,6 +54,17 @@ SERVICE_LOG_END_REG = (
 SERIAL_NUM_REG = 0x01F4
 SERIAL_NUM_REG_LENGTH = 5
 
+# Identifier register PowerZone 200
+IDENTITY_REG = 0x07d0
+IDENTITY_REG_LENGTH = 10
+
+# Power Zone 200 Alarm registers
+POWER_ZONE_200_ALARM_REG = 0x21CA 
+POWER_ZONE_200_ALARM_LENGTH = 40
+# Power Zone 200 Warning registers
+POWER_ZONE_200_WARNING_REG = 0x2199
+POWER_ZONE_200_WARNING_LENGTH = 21
+
 NEXUS_ALARM_LOG_STARTING_REG = 0x064
 NEXUS_ALARM_LOG_STRIDE = 4
 NEXUS_ALARM_LOG_END_REG = (
@@ -92,6 +103,7 @@ class Evolution(GeneratorController):
         # Controller Type
         self.EvolutionController = None
         self.SynergyController = False
+        self.PowerZone200 = False
         self.Evolution2 = False
         self.PowerPact = False
         self.PreNexus = False
@@ -105,6 +117,7 @@ class Evolution(GeneratorController):
             False  # Flag to let the heartbeat thread know there is a problem
         )
         self.LastAlarmValue = 0xFF  # Last Value of the Alarm / Status Register
+        self.LastSwitchMode = "Auto"
         self.bUseLegacyWrite = False  # Nexus will set this to True
         self.bEnhancedExerciseFrequency = (
             False  # True if controller supports biweekly and monthly exercise times
@@ -237,6 +250,7 @@ class Evolution(GeneratorController):
             "0212": [2, 0],  # Unknown status data
             "0213": [2, 0],  # Wifi Signal Strength RSSI (Evo2)
             "004c": [2, 0],  # Unknown register data
+            "0234": [2, 0],  # PowerZone 200
             "0235": [2, 0],  # Gain (EvoLC)
             "0236": [2, 0],  # Two Wire Start (EvoAC)
             "0237": [2, 0],  # Set Voltage (Evo LC)
@@ -260,6 +274,8 @@ class Evolution(GeneratorController):
             "0248": [2, 0],  #  Unknown (EvoLC)
             "0249": [2, 0],  #  Unknown (EvoLC)
             "024a": [2, 0],  #  Unknown (EvoLC)
+            "0255": [2, 0],  #  return to utility delay (Power Zone 200)
+            "0256": [2, 0],  #  cool down delay (Power Zone 200)
             "0258": [2, 0],  #  Unknown (EvoLC, NexusLC) Some type of setting
             "025a": [2, 0],  #  Unknown (EvoLC)
             "005c": [2, 0],  # Unknown , possible model reg on EvoLC
@@ -271,6 +287,34 @@ class Evolution(GeneratorController):
             "05f5": [2, 0],  # Evo AC   Current 2
             "05f6": [2, 0],  # Evo AC   Current Cal 1
             "05f7": [2, 0],  # Evo AC   Current Cal 1
+            "0637": [2, 0],  # Power Zone 200 Alarm is active if non zero
+            "0638": [2, 0],  # Power Zone 200 Warning is active if non zero
+            "0639": [2, 0],  # Power Zone 200 Maintenance is active if non zero
+            "063a": [2, 0],  # Power Zone 200 single phase if non zero
+            "07e6": [2, 0],  # Firmware Build Major
+            "07e7": [2, 0],  # Firmware Build Minor
+            "1f72": [2, 0],  # Power Zone 200 L1 Volts
+            "1f73": [2, 0],  # Power Zone 200 L2 Volts
+            "1f74": [2, 0],  # Power Zone 200 L3 Volts
+            "1f75": [2, 0],  # Power Zone 200 L1 Amps, divide by 100
+            "1f76": [2, 0],  # Power Zone 200 L2 Amps, divide by 100
+            "1f77": [2, 0],  # Power Zone 200 L3 Amps, divide by 100
+            "1f7b": [2, 0],  # Power Zone 200 Power Factor, divide by 100
+            "1f7c": [4, 0],  # Power Zone 200 totak kw hours
+            "1fa4": [2, 0],  # Power Zone 200 Utility volts L1
+            "1fa5": [2, 0],  # Power Zone 200 Utility volts L2
+            "1fa6": [2, 0],  # Power Zone 200 Utility volts L2
+            "2134": [2, 0],  # Power Zone 200 Real Power kW
+            "2135": [2, 0],  # Power Zone 200 Reactive Power kW
+            "2136": [2, 0],  # Power Zone 200 Apparant Power kW
+            "2137": [2, 0],  # Power Zone 200 Last Run Minutes (duration of the last generator run in minutes)
+            "2138": [2, 0],  # Power Zone 200 Last Run kWH (last generator run in kWH)
+            "2166": [2, 0],  # Power Zone 200 Transfer switch active = 1
+            "0608": [2, 0],  # Power Zone 200 Engine intake/throttle temperature, deg F
+            "060c": [2, 0],  # Power Zone 200 Engine percent torque (engine load), %
+            "0613": [2, 0],  # Power Zone 200 Fuel pressure, cranking
+            "0614": [2, 0],  # Power Zone 200 Fuel pressure, running
+            "2008": [2, 0],  # Power Zone 200 Oil level
         }
 
         # registers that need updating more frequently than others to make things more responsive
@@ -348,7 +392,7 @@ class Evolution(GeneratorController):
             self.ModBus.ProcessTransaction(
                 "%04x" % SERIAL_NUM_REG, SERIAL_NUM_REG_LENGTH
             )
-
+            self.DelayBetweenFrames()
             self.DetectController()
 
             if self.EvolutionController:
@@ -360,10 +404,11 @@ class Evolution(GeneratorController):
                     "%04x" % NEXUS_ALARM_LOG_STARTING_REG, NEXUS_ALARM_LOG_STRIDE
                 )
 
+            self.DelayBetweenFrames()
             self.ModBus.ProcessTransaction(
                 "%04x" % START_LOG_STARTING_REG, START_LOG_STRIDE
             )
-
+            self.DelayBetweenFrames()
             if self.EvolutionController:
                 self.ModBus.ProcessTransaction(
                     "%04x" % SERVICE_LOG_STARTING_REG, SERVICE_LOG_STRIDE
@@ -375,7 +420,7 @@ class Evolution(GeneratorController):
                 self.ModBus.ProcessTransaction(
                     PrimeReg, int(PrimeInfo[self.REGLEN] // 2)
                 )
-
+                self.DelayBetweenFrames()
             for Reg, Info in self.BaseRegisters.items():
                 if self.IsStopping:
                     break
@@ -383,7 +428,7 @@ class Evolution(GeneratorController):
                 # but modbus makes register request in word increments so the request needs to
                 # in word multiples, not bytes
                 self.ModBus.ProcessTransaction(Reg, int(Info[self.REGLEN] // 2))
-
+                self.DelayBetweenFrames()
             # check for model specific info in read from conf file, if not there then add some defaults
             if not self.IsStopping:
                 self.CheckModelSpecificInfo(NoLookUp=self.Simulation)
@@ -558,9 +603,9 @@ class Evolution(GeneratorController):
     def GetGenericModel(self):
 
         if self.LiquidCooled:
-            return "Generic Liquid Cooled"
+            return "Generac Liquid Cooled"
         else:
-            return "Generic Air Cooled"
+            return "Generac Air Cooled"
 
     # ---------------------------------------------------------------------------
     def GetGenericKW(self):
@@ -929,6 +974,7 @@ class Evolution(GeneratorController):
              # EcoGen Variable Speed Constant Frequency
             11: ["15KW","ECOVSCF","120/240","1","999 cc","240",],
          }
+        
         # This should cover the guardian line
         ModelLookUp_EvoAC = {  # ID : [KW or KVA Rating, Hz Rating, Voltage Rating, Phase, Engine Displacement Nominal Line Voltage ]
             1: ["10KW", "60", "120/240", "1", "426 cc", "240"],     #
@@ -959,7 +1005,7 @@ class Evolution(GeneratorController):
             4: ["20KW", "60", "120/240", "1", "999 cc", "240"],     #
             2: ["20KW", "60", "120/240", "1", "999 cc", "240"],     # 22kW-315 (Demand Response?)
             11: ["15KW","60","120/240","1","999 cc","240",],        # EcoGen ECOVSCF not 60
-            5: ["10KW", "60", "120/240", "1", "426 cc", "240"],     #
+            5: ["10KW", "60", "120/240", "1", "460 cc", "240"],     #
             15: ["11KW", "60", "240", "1", "530 cc", "240"],        #
             7: ["13KW", "60", "120/240", "1", "992 cc", "240"],     #
             # Evo G00704311 Evo2 22kw
@@ -988,6 +1034,12 @@ class Evolution(GeneratorController):
             14: ["13KVA","50","220,230,240","1","992 cc","240",],   #
         }
 
+        ModelLookup_PowerZone200 = {
+            6: ["22KW","60","120/240","1","997 cc","240",],        #
+            7: ["24KW","60","120/240","1","997 cc","240",],        #
+            9: ["28KW","60","120/240","1","997 cc","240",],        #
+        }
+
         LookUp = None
         if self.Evolution2:
             LookUp = ModelLookUp_EvoAC2
@@ -995,6 +1047,8 @@ class Evolution(GeneratorController):
             LookUp = ModelLookup_PowerPact
         elif self.SynergyController:
             LookUp = ModelLookUp_EvoAC_Synergy
+        elif self.PowerZone200:
+            LookUp = ModelLookup_PowerZone200
         elif self.EvolutionController:
             LookUp = ModelLookUp_EvoAC
         else:
@@ -1044,13 +1098,101 @@ class Evolution(GeneratorController):
         return "Unknown"
 
     # ---------------------------------------------------------------------------
+    # Browser like user agent. Generac's web site is behind bot protection that
+    # rejects requests that do not look like they come from a browser.
+    GeneracUserAgent = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+
+    # ---------------------------------------------------------------------------
+    def GeneracWebRequest(self, Method, Path, Body=""):
+        # Perform a single request to Generac's web site. A trailing slash on the
+        # path and a minimal set of browser like headers are required, otherwise
+        # the request is rejected by the site's bot protection. Cookies set by
+        # earlier responses are replayed, which some IP addresses need in order to
+        # pass the Imperva/Incapsula bot protection. Returns (status, decoded body).
+        conn = None
+        try:
+            conn = HTTPSConnection("www.generac.com", 443, timeout=25)
+            headers = {
+                "User-Agent": self.GeneracUserAgent,
+                "Accept": "*/*",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+            if Method == "POST":
+                headers["Content-Type"] = "application/json"
+            Cookies = getattr(self, "GeneracCookies", None)
+            if Cookies:
+                headers["Cookie"] = "; ".join(
+                    [Name + "=" + Value for Name, Value in Cookies.items()]
+                )
+            conn.request(Method, Path, Body, headers=headers)
+            response = conn.getresponse()
+            status = response.status
+            self.StoreGeneracCookies(response)
+            RawData = response.read()
+            if sys.version_info[0] < 3:
+                data = RawData  # Python 2.x
+            else:
+                # response.info() is deprecated; read the charset from the header
+                ContentType = response.getheader("Content-Type", "") or ""
+                encoding = "utf8"
+                if "charset=" in ContentType.lower():
+                    encoding = (
+                        ContentType.lower().split("charset=")[1].split(";")[0].strip()
+                        or "utf8"
+                    )
+                data = RawData.decode(encoding, "replace")
+            return status, data
+        finally:
+            if conn != None:
+                conn.close()
+
+    # ---------------------------------------------------------------------------
+    def StoreGeneracCookies(self, response):
+        # Collect any cookies the site sets so they can be replayed on later
+        # requests (needed to pass Incapsula bot protection from some IPs).
+        try:
+            if sys.version_info[0] < 3:
+                SetCookies = response.msg.getheaders("set-cookie")
+            else:
+                SetCookies = response.headers.get_all("Set-Cookie") or []
+            if not SetCookies:
+                return
+            Cookies = getattr(self, "GeneracCookies", None)
+            if Cookies == None:
+                Cookies = {}
+            for Header in SetCookies:
+                Pair = Header.split(";", 1)[0].strip()
+                if "=" in Pair:
+                    Name, Value = Pair.split("=", 1)
+                    Name = Name.strip()
+                    if Name:
+                        Cookies[Name] = Value.strip()
+            self.GeneracCookies = Cookies
+        except Exception:
+            pass
+
+
+    # ---------------------------------------------------------------------------
+    def IsGeneracBotChallenge(self, Status, Data):
+        # Detect when the site returned a bot protection / challenge response
+        # instead of the requested content.
+        if Status == None or (Status >= 300 and Status < 400) or Status in [403, 429]:
+            return True
+        if Data != None and (
+            "_Incapsula_Resource" in Data or "Incapsula incident" in Data
+        ):
+            return True
+        return False
+
+    # ---------------------------------------------------------------------------
     def LookUpSNInfo(self, SkipKW=False, NoLookUp=False):
 
         if NoLookUp:
             return False
 
-        productId = None
-        ModelNumber = None
         ReturnKW = "Unknown"
         ReturnModel = "Unknown"
 
@@ -1076,137 +1218,131 @@ class Evolution(GeneratorController):
             self.LogError(
                 "Looking up model info on internet using SN: " + str(SerialNumber)
             )
-            myregex = re.compile("<.*?>")
 
+            # Generac retired the old GeneracSelfHelpWebService.asmx web service.
+            # The current site validates the serial number and returns the model
+            # number plus a product description (which contains the kW rating)
+            # from the ProductLookupPage/BuildManualList endpoint.
+
+            # strip anything that is not alphanumeric from the serial number
+            QuerySerial = re.sub(r"[^0-9A-Za-z]", "", SerialNumber)
+
+            # Prime the session by loading the product info page first. This
+            # picks up the Incapsula cookies a browser would have, which some IP
+            # addresses need before the api endpoints will answer.
             try:
-                conn = HTTPSConnection("www.generac.com", 443, timeout=25)
-                conn.request(
-                    "GET",
-                    "/GeneracCorporate/WebServices/GeneracSelfHelpWebService.asmx/GetSearchResults?query="
-                    + SerialNumber,
-                    "",
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/64.0.3282.140 Safari/537.36 Edge/17.17134"
-                    },
-                )
-                r1 = conn.getresponse()
-            except Exception as e1:
-                conn.close()
-                self.LogErrorLine("Error in LookUpSNInfo (request 1): " + str(e1))
-                return False, ReturnModel, ReturnKW
-
-            try:
-                myresponse1 = ""
-                if sys.version_info[0] < 3:
-                    data1 = r1.read()  # Python 2.x
-                else:
-                    encoding = r1.info().get_param("charset", "utf8")  # Python 3.x
-                    data1 = r1.read().decode(encoding)
-                data2 = re.sub(myregex, "", data1)
-                myresponse1 = json.loads(data2)
-                ModelNumber = myresponse1["SerialNumber"]["ModelNumber"]
-
-                if ModelNumber == None:
-                    ModelNumber = myresponse1["ManualModelNumber"]
-
-                if ModelNumber == None or not len(ModelNumber):
-                    self.LogError("Error in LookUpSNInfo: Model (response1)")
-                    conn.close()
-                    return False, ReturnModel, ReturnKW
-
-                self.LogError("Found: Model: %s" % str(ModelNumber))
-                ReturnModel = ModelNumber
-
-            except Exception as e1:
-                self.LogErrorLine("Error in LookUpSNInfo (parse request 1): " + str(e1))
-                self.LogError("Response: " + str(myresponse1))
-                conn.close()
-                return False, ReturnModel, ReturnKW
-
-            try:
-                productId = myresponse1["Results"][0]["Id"]
+                self.GeneracWebRequest("GET", "/support/product-info-user-manuals/")
             except Exception as e1:
                 self.LogErrorLine(
-                    "Notice: product ID not found online. Using serial number to complete lookup."
+                    "Notice in LookUpSNInfo: unable to prime session: " + str(e1)
                 )
-                productId = SerialNumber
+
+            # The manual lookup (BuildManualList) expects the serial number
+            # exactly as it appears on the unit label (the same value the
+            # website's own form submits). Try that raw serial number first.
+            SerialCandidates = [QuerySerial]
+
+            # Step 1: validate the serial number. This returns a zero padded
+            # variant of the serial number which we keep as a fallback in case
+            # the raw form is not recognized.
+            try:
+                Status, Data = self.GeneracWebRequest(
+                    "GET",
+                    "/api/productsapi/ValidateSerialNumber/?SerialNumber=" + QuerySerial,
+                )
+                if self.IsGeneracBotChallenge(Status, Data):
+                    self.LogError(
+                        "Notice in LookUpSNInfo: serial number validation blocked by the Generac web site (bot protection)."
+                    )
+                else:
+                    Validation = json.loads(Data).get("serialNumberValidation", None)
+                    if Validation != None and Validation.get("serialNumber", None):
+                        Padded = str(Validation["serialNumber"])
+                        if Padded not in SerialCandidates:
+                            SerialCandidates.append(Padded)
+            except Exception as e1:
+                self.LogErrorLine(
+                    "Notice in LookUpSNInfo: unable to validate serial number: " + str(e1)
+                )
+
+            # fall back to the raw serial number only if validation did not
+            # return one
+            if not len(SerialCandidates):
+                SerialCandidates.append(QuerySerial)
+
+            # Step 2: look up the model number and description using the serial
+            ManualHTML = None
+            SawChallenge = False
+            SawCleanResponse = False
+            for Candidate in SerialCandidates:
+                try:
+                    Status, Data = self.GeneracWebRequest(
+                        "POST",
+                        "/ProductLookupPage/BuildManualList/",
+                        Body=json.dumps(
+                            {
+                                "serialNbr": Candidate,
+                                "sourceApplication": "Residential",
+                                "languageId": "",
+                            }
+                        ),
+                    )
+                except Exception as e1:
+                    self.LogErrorLine(
+                        "Error in LookUpSNInfo (model lookup request): " + str(e1)
+                    )
+                    continue
+
+                if self.IsGeneracBotChallenge(Status, Data):
+                    SawChallenge = True
+                    continue
+
+                if Data != None and "Model Number:" in Data:
+                    ManualHTML = Data
+                    break
+
+                SawCleanResponse = True
+
+            if ManualHTML == None:
+                if SawCleanResponse or not SawChallenge:
+                    self.LogError(
+                        "Error in LookUpSNInfo: model info not found on the Generac web site for serial number "
+                        + str(SerialNumber)
+                    )
+                else:
+                    self.LogError(
+                        "Error in LookUpSNInfo: model lookup blocked by the Generac web site (bot protection)."
+                    )
+                return False, ReturnModel, ReturnKW
+
+            # the site separates the labels and values with non-breaking spaces.
+            # Normalize them to regular spaces so parsing works the same on both
+            # Python 2 (bytes, UTF-8 "\xc2\xa0") and Python 3 (str, "\xa0").
+            ManualHTML = ManualHTML.replace("\xc2\xa0", " ").replace("\xa0", " ")
+
+            # parse the model number from the returned HTML
+            ModelMatch = re.search(r"Model Number:\s*</b>\s*([^<\r\n]+)", ManualHTML)
+            if ModelMatch:
+                ReturnModel = ModelMatch.group(1).strip()
+
+            if ReturnModel == "Unknown" or not len(ReturnModel):
+                self.LogError("Error in LookUpSNInfo: Model number not found in response")
+                return False, ReturnModel, ReturnKW
+
+            self.LogError("Found: Model: %s" % str(ReturnModel))
 
             if SkipKW:
                 return True, ReturnModel, ReturnKW
 
-            try:
-                if productId == SerialNumber:
-                    conn.request(
-                        "GET",
-                        "/service-support/product-support-lookup/product-manuals?modelNo="
-                        + productId,
-                        "",
-                        headers={
-                            "User-Agent": "Mozilla/4.0 (compatible; MSIE 5.01; Windows NT 5.0)"
-                        },
-                    )
-                else:
-                    conn.request(
-                        "GET",
-                        "/GeneracCorporate/WebServices/GeneracSelfHelpWebService.asmx/GetProductById?productId="
-                        + productId,
-                        "",
-                        headers={
-                            "User-Agent": "Mozilla/4.0 (compatible; MSIE 5.01; Windows NT 5.0)"
-                        },
-                    )
-                r1 = conn.getresponse()
-
-                if sys.version_info[0] < 3:
-                    data1 = r1.read()  # Python 2.x
-                else:
-                    encoding = r1.info().get_param("charset", "utf8")  # Python 3.x
-                    data1 = r1.read().decode(encoding)
-
-                conn.close()
-                data2 = re.sub(myregex, "", data1)
-            except Exception as e1:
-                self.LogErrorLine(
-                    "Error in LookUpSNInfo (parse request 2, product ID): " + str(e1)
+            # parse the kW rating from the product description (e.g. "OBS 22KW ...")
+            DescMatch = re.search(r"Description:\s*</b>\s*([^<\r\n]+)", ManualHTML)
+            if DescMatch:
+                KWMatch = re.search(
+                    r"(\d+(?:\.\d+)?)\s*KW", DescMatch.group(1), re.IGNORECASE
                 )
-
-            try:
-                if productId == SerialNumber:
-                    # within the formatted HTML we are looking for something like this :   "Manuals: 17KW/990 HNYWL+200A SE"
-                    ListData = re.split("<div", data1)  #
-                    for Count in range(len(ListData)):
-                        if "Manuals:" in ListData[Count]:
-                            KWStr = re.findall(r"(\d+)KW", ListData[Count])[0]
-                            if len(KWStr) and KWStr.isdigit():
-                                ReturnKW = KWStr
-
-                else:
-                    myresponse2 = json.loads(data2)
-
-                    kWRating = myresponse2["Attributes"][0]["Value"]
-
-                    if "kw" in kWRating.lower():
-                        kWRating = self.removeAlpha(kWRating)
-                    elif "watts" in kWRating.lower():
-                        kWRating = self.removeAlpha(kWRating)
-                        kWRating = str(int(kWRating) / 1000)
-                    else:
-                        if int(kWRating) < 1000:
-                            kWRating = str(int(kWRating))
-                        else:
-                            kWRating = str(int(kWRating) / 1000)
-
-                    ReturnKW = kWRating
-
-                    if not len(kWRating):
-                        self.LogError("Error in LookUpSNInfo: KW")
-                        return False, ReturnModel, ReturnKW
-
-                    self.LogError("Found: KW: %skW" % str(kWRating))
-
-            except Exception as e1:
-                self.LogErrorLine("Error in LookUpSNInfo: (parse KW)" + str(e1))
-                return False, ReturnModel, ReturnKW
+                if KWMatch:
+                    ReturnKW = KWMatch.group(1)
+                    self.LogError("Found: KW: %skW" % str(ReturnKW))
 
             return True, ReturnModel, ReturnKW
         except Exception as e1:
@@ -1219,7 +1355,7 @@ class Evolution(GeneratorController):
         UnknownController = False
         # issue modbus read
         self.ModBus.ProcessTransaction("0000", 1)
-
+        self.DelayBetweenFrames()
         # read register from cached list.
         Value = self.GetRegisterValueFromList("0000")
         if len(Value) != 4:
@@ -1235,6 +1371,7 @@ class Evolution(GeneratorController):
         # 0x12,0x13 or 0x14  Evolution Power Pact, Air Cooled
         # 0x15  Evolution 2.0, Air Cooled
         # 0x16  Evolution 4.5L, Liquid Cooled
+        # 0x19  PowerZone200, 115200 serial data rate
 
         msgbody = "\nThis email is a notification informing you that the software has detected a generator "
         msgbody += "model variant that has not been validated by the authors of this sofrware. "
@@ -1245,6 +1382,9 @@ class Evolution(GeneratorController):
         msgbody += "Once your feedback is receivd we an add your model product code and controller type to the list in the software."
 
         if self.EvolutionController == None:
+
+            if ProductModel == 0x19:
+                self.PowerZone200 = True
 
             if ProductModel == 0x0A:
                 self.SynergyController = True
@@ -1264,7 +1404,7 @@ class Evolution(GeneratorController):
             # if reg 000 is 3 or less then assume we have a Nexus Controller
             if ProductModel == 0x03 or ProductModel == 0x06 or ProductModel == 0x02:
                 self.EvolutionController = False  # "Nexus"
-            elif (ProductModel in [0x09, 0x0b, 0x0C, 0x0A, 0x12, 0x13, 0x14, 0x15, 0x16]):
+            elif (ProductModel in [0x09, 0x0b, 0x0C, 0x0A, 0x12, 0x13, 0x14, 0x15, 0x16, 0x19]):
                 self.EvolutionController = True  # "Evolution"
             else:
                 # set a reasonable default
@@ -1294,7 +1434,7 @@ class Evolution(GeneratorController):
 
         if self.LiquidCooled == None:
             if (
-                ProductModel in [0x02, 0x03, 0x04, 0x05, 0x09, 0x0A, 0x0B, 0x12, 0x13, 0x04, 0x15]
+                ProductModel in [0x02, 0x03, 0x04, 0x05, 0x09, 0x0A, 0x0B, 0x12, 0x13, 0x04, 0x15, 0x19]
             ):
                 self.LiquidCooled = False  # Air Cooled
             elif ProductModel in [0x06, 0x0C, 0x16]:
@@ -1321,7 +1461,7 @@ class Evolution(GeneratorController):
             self.bUseLegacyWrite = True
 
         if not self.bEnhancedExerciseFrequency:
-            if self.Evolution2 or self.PowerPact or self.SynergyController:
+            if self.Evolution2 or self.PowerPact or self.SynergyController or self.PowerZone200:
                 self.bEnhancedExerciseFrequency = True
         if UnknownController:
             msg = "Unknown Controller Found: %x" % ProductModel
@@ -1352,6 +1492,7 @@ class Evolution(GeneratorController):
                 0x14: "Power Pact Evolution, Air Cooled (20)",
                 0x15: "Evolution 2.0, Air Cooled",
                 0x16: "Evolution 4.5L, Liquid Cooled",
+                0x19: "Power Zone 200, Air Cooled"
             }
             Value = self.GetRegisterValueFromList("0000")
             if len(Value) != 4:
@@ -1362,7 +1503,9 @@ class Evolution(GeneratorController):
         else:
 
             if self.EvolutionController:
-                if self.SynergyController:
+                if self.PowerZone200:
+                    outstr = "Power Zone 200, "
+                elif self.SynergyController:
                     outstr = "Synergy Evolution, "
                 elif self.PowerPact:
                     outstr = "Power Pact Evolution, "
@@ -1397,6 +1540,7 @@ class Evolution(GeneratorController):
                     self.ModBus.ProcessTransaction(
                         PrimeReg, int(PrimeInfo[self.REGLEN] // 2)
                     )
+                    self.DelayBetweenFrames()
                     if self.IsStopping:
                         return
                     if (
@@ -1424,6 +1568,7 @@ class Evolution(GeneratorController):
             # but modbus makes register request in word increments so the request needs to
             # in word multiples, not bytes
             self.ModBus.ProcessTransaction(Reg, int(Info[self.REGLEN] // 2))
+            self.DelayBetweenFrames()
             counter += 1
 
         # check that we have the serial number, if we do not then retry
@@ -1433,9 +1578,33 @@ class Evolution(GeneratorController):
             self.ModBus.ProcessTransaction(
                 "%04x" % SERIAL_NUM_REG, SERIAL_NUM_REG_LENGTH
             )
+            self.DelayBetweenFrames()
+
+        if self.PowerZone200:
+            # check that we have the identity, if we do not then retry
+            RegStr = "%04x" % IDENTITY_REG
+            Value = self.GetRegisterValueFromList(RegStr)  # identity Register
+            if len(Value) != 40:
+                self.ModBus.ProcessTransaction(
+                    "%04x" % IDENTITY_REG, IDENTITY_REG_LENGTH
+                )
 
     # -------------Evolution:UpdateLogRegistersAsMaster--------------------------
     def UpdateLogRegistersAsMaster(self):
+
+        if self.PowerZone200:
+            for Register in range(POWER_ZONE_200_ALARM_REG,POWER_ZONE_200_ALARM_REG + POWER_ZONE_200_ALARM_LENGTH):
+                RegStr = "%04x" % Register
+                self.ModBus.ProcessTransaction(RegStr, 1)
+                self.DelayBetweenFrames()
+                if self.IsStopping:
+                    return
+            for Register in range(POWER_ZONE_200_WARNING_REG,POWER_ZONE_200_WARNING_REG + POWER_ZONE_200_WARNING_LENGTH):
+                RegStr = "%04x" % Register
+                self.ModBus.ProcessTransaction(RegStr, 1)
+                self.DelayBetweenFrames()
+                if self.IsStopping:
+                    return
 
         # Start / Stop Log
         for Register in self.LogRange(
@@ -1443,6 +1612,7 @@ class Evolution(GeneratorController):
         ):
             RegStr = "%04x" % Register
             self.ModBus.ProcessTransaction(RegStr, START_LOG_STRIDE)
+            self.DelayBetweenFrames()
             if self.IsStopping:
                 return
 
@@ -1453,6 +1623,7 @@ class Evolution(GeneratorController):
             ):
                 RegStr = "%04x" % Register
                 self.ModBus.ProcessTransaction(RegStr, SERVICE_LOG_STRIDE)
+                self.DelayBetweenFrames()
                 if self.IsStopping:
                     return
             # Alarm Log
@@ -1461,6 +1632,7 @@ class Evolution(GeneratorController):
             ):
                 RegStr = "%04x" % Register
                 self.ModBus.ProcessTransaction(RegStr, ALARM_LOG_STRIDE)
+                self.DelayBetweenFrames()
                 if self.IsStopping:
                     return
         else:
@@ -1470,6 +1642,7 @@ class Evolution(GeneratorController):
             ):
                 RegStr = "%04x" % Register
                 self.ModBus.ProcessTransaction(RegStr, NEXUS_ALARM_LOG_STRIDE)
+                self.DelayBetweenFrames()
                 if self.IsStopping:
                     return
 
@@ -1566,13 +1739,27 @@ class Evolution(GeneratorController):
         Value = None # 0x000  # writing any value to index register is valid for remote start / stop commands
 
         if Command == "start":
-            Register = 0x0001  # remote start (radio start)
+            if self.PowerZone200:
+                Register = 0x0019
+                Value = 0x012c  # # This is the number of seconds to run (300)
+            else:
+                Register = 0x0001  # remote start (radio start)
         elif Command == "stop":
-            Register = 0x0000  # remote stop (radio stop)
+            if self.PowerZone200:
+                Register = 0x001a
+            else:
+                Register = 0x0000  # remote stop (radio stop)
         elif Command == "starttransfer":
-            Register = 0x0002  # start the generator, then engage the transfer transfer switch
+            if self.PowerZone200:
+                Register = 0x0028
+                Value = 0x0012C     # This is the number of seconds to run (300)
+            else:
+                Register = 0x0002  # start the generator, then engage the transfer transfer switch
         elif Command == "startexercise":
-            Register = 0x0003  # remote run in quiet mode (exercise)
+            if self.PowerZone200:
+                Register = 0x001b
+            else:
+                Register = 0x0003  # remote run in quiet mode (exercise)
         # This command resets all maintenance timers
         elif Command == "resetmainttimer":
             Register == 0x0009
@@ -1611,6 +1798,7 @@ class Evolution(GeneratorController):
                     Data.append(LowByte)  # Value for indexed register (Low byte)
 
                     self.ModBus.ProcessWriteTransaction("0004", len(Data) // 2, Data)
+                    self.DelayBetweenFrames()
 
                 LowByte = register & 0x00FF
                 HighByte = register >> 8
@@ -1619,6 +1807,7 @@ class Evolution(GeneratorController):
                 Data.append(LowByte)  # indexed register to be written (Low byte)
 
                 self.ModBus.ProcessWriteTransaction("0003", len(Data) // 2, Data)
+                self.DelayBetweenFrames()
         except Exception as e1:
             self.LogErrorLine("Error in WriteIndexedRegister: " + str(e1))
 
@@ -1714,7 +1903,7 @@ class Evolution(GeneratorController):
     # ----------  Evolution:SetGeneratorExerciseTime-----------------------------
     def SetGeneratorExerciseTime(self, CmdString):
 
-        if not self.bUseLegacyWrite and self.EvolutionController and not self.Evolution2:
+        if not self.bUseLegacyWrite and self.EvolutionController and not self.Evolution2 and not self.PowerZone200:
             # set legacy write for Evo1 with Firmware lower than V1.10
             FWVersion = self.GetFirmwareVersion()
             self.LogDebug("Check Legacy Write: %s" % FWVersion)
@@ -1727,7 +1916,7 @@ class Evolution(GeneratorController):
             return self.AltSetGeneratorExerciseTime(CmdString)
         
         # extract time of day and day of week from command string
-        # format is day:hour:min  Monday:15:00
+        # format is day,hour,min  Monday,15,00
         msgbody = "Invalid command syntax for command setexercise"
         try:
 
@@ -1786,12 +1975,14 @@ class Evolution(GeneratorController):
                     )
                     return msgbody
                 self.ModBus.ProcessWriteTransaction("002d", len(Data) // 2, Data)
+                self.DelayBetweenFrames()
 
             Data = []
             Data.append(0x00)  #
             Data.append(Day)  # Day
 
             self.ModBus.ProcessWriteTransaction("002e", len(Data) // 2, Data)
+            self.DelayBetweenFrames()
 
             #
             Data = []
@@ -1799,6 +1990,7 @@ class Evolution(GeneratorController):
             Data.append(Minute)  #
 
             self.ModBus.ProcessWriteTransaction("002c", len(Data) // 2, Data)
+            self.DelayBetweenFrames()
 
         return "Set Exercise Time Command sent"
 
@@ -1973,6 +2165,7 @@ class Evolution(GeneratorController):
         Data.append(0x00)
         Data.append(ModeValue)
         self.ModBus.ProcessWriteTransaction("002f", len(Data) // 2, Data)
+        self.DelayBetweenFrames()
 
         return "Set Quiet Mode Command sent"
 
@@ -2000,6 +2193,7 @@ class Evolution(GeneratorController):
         Data.append(0)  # 0010
         Data.append(d.year - 2000)
         self.ModBus.ProcessWriteTransaction("000e", len(Data) // 2, Data)
+        self.DelayBetweenFrames()
 
     # ------------ Evolution:GetRegisterLength ----------------------------------
     def GetRegisterLength(self, Register):
@@ -2034,6 +2228,7 @@ class Evolution(GeneratorController):
     def ValidateRegister(self, Register, Value):
 
         ValidationOK = True
+        RegisterInt = int(Register, 16)
         # validate the length of the data against the size of the register
         RegLength = self.GetRegisterLength(Register)
         if RegLength:  # if this is a base register
@@ -2047,8 +2242,8 @@ class Evolution(GeneratorController):
                 ValidationOK = False
         # appears to be Start/Stop Log or service log
         elif (
-            int(Register, 16) >= SERVICE_LOG_STARTING_REG
-            and int(Register, 16) <= SERVICE_LOG_END_REG
+            RegisterInt >= SERVICE_LOG_STARTING_REG
+            and RegisterInt <= SERVICE_LOG_END_REG
         ):
             if len(Value) != 16:
                 self.LogError(
@@ -2057,8 +2252,8 @@ class Evolution(GeneratorController):
                 )
                 ValidationOK = False
         elif (
-            int(Register, 16) >= START_LOG_STARTING_REG
-            and int(Register, 16) <= START_LOG_END_REG
+            RegisterInt >= START_LOG_STARTING_REG
+            and RegisterInt <= START_LOG_END_REG
         ):
             if len(Value) != 16:
                 self.LogError(
@@ -2067,8 +2262,8 @@ class Evolution(GeneratorController):
                 )
                 ValidationOK = False
         elif (
-            int(Register, 16) >= ALARM_LOG_STARTING_REG
-            and int(Register, 16) <= ALARM_LOG_END_REG
+            RegisterInt >= ALARM_LOG_STARTING_REG
+            and RegisterInt <= ALARM_LOG_END_REG
         ):
             if len(Value) != 20:  #
                 self.LogError(
@@ -2077,8 +2272,8 @@ class Evolution(GeneratorController):
                 )
                 ValidationOK = False
         elif (
-            int(Register, 16) >= NEXUS_ALARM_LOG_STARTING_REG
-            and int(Register, 16) <= NEXUS_ALARM_LOG_END_REG
+            RegisterInt >= NEXUS_ALARM_LOG_STARTING_REG
+            and RegisterInt <= NEXUS_ALARM_LOG_END_REG
         ):
             if len(Value) != 16:  # Nexus alarm reg is 16 chars, no alarm codes
                 self.LogError(
@@ -2086,13 +2281,39 @@ class Evolution(GeneratorController):
                     % (Register, Value)
                 )
                 ValidationOK = False
-        elif int(Register, 16) == SERIAL_NUM_REG:
+        elif RegisterInt == SERIAL_NUM_REG:
             if len(Value) != 20:
                 self.LogError(
                     "Validation Error: Invalid register length (Model) %s %s"
                     % (Register, Value)
                 )
                 ValidationOK = False
+        elif RegisterInt == IDENTITY_REG:
+            if len(Value) != 40:
+                self.LogError(
+                    "Validation Error: Invalid register length (Identity) %s %s"
+                    % (Register, Value)
+                )
+                ValidationOK = False
+        elif self.PowerZone200:
+            if (RegisterInt >= POWER_ZONE_200_ALARM_REG 
+                and RegisterInt < (POWER_ZONE_200_ALARM_REG + POWER_ZONE_200_ALARM_LENGTH)):
+                if len(Value) != 4:
+                    self.LogError(
+                        "Validation Error: Invalid register length (PZ200 Alarm) %s %s"
+                        % (Register, Value)
+                    )
+                    ValidationOK = False
+            # Power Zone 200 Warning registers
+            if (RegisterInt >= POWER_ZONE_200_WARNING_REG 
+                and RegisterInt < (POWER_ZONE_200_WARNING_REG + POWER_ZONE_200_WARNING_LENGTH)):
+                if len(Value) != 4:
+                    self.LogError(
+                        "Validation Error: Invalid register length (PZ200 Warning) %s %s"
+                        % (Register, Value)
+                    )
+                    ValidationOK = False
+
         else:
             self.LogError(
                 "Validation Error: Invalid register or length (Unkown) %s %s"
@@ -2105,31 +2326,43 @@ class Evolution(GeneratorController):
     # ------------ Evolution:RegisterIsLog --------------------------------------
     def RegisterIsLog(self, Register):
 
+        RegisterInt = int(Register, 16)
         ## Is this a log register
+        if self.PowerZone200:
+            # Power Zone 200 Alarm registers
+            if (RegisterInt >= POWER_ZONE_200_ALARM_REG 
+                and RegisterInt < (POWER_ZONE_200_ALARM_REG + POWER_ZONE_200_ALARM_LENGTH)):
+                return True
+            # Power Zone 200 Warning registers
+            if (RegisterInt >= POWER_ZONE_200_WARNING_REG 
+                            and RegisterInt < (POWER_ZONE_200_WARNING_REG + POWER_ZONE_200_WARNING_LENGTH)):
+                            return True
         if (
-            int(Register, 16) >= SERVICE_LOG_STARTING_REG
-            and int(Register, 16) <= SERVICE_LOG_END_REG
+            RegisterInt >= SERVICE_LOG_STARTING_REG
+            and RegisterInt <= SERVICE_LOG_END_REG
             and self.EvolutionController
         ):
             return True
         elif (
-            int(Register, 16) >= START_LOG_STARTING_REG
-            and int(Register, 16) <= START_LOG_END_REG
+            RegisterInt >= START_LOG_STARTING_REG
+            and RegisterInt <= START_LOG_END_REG
         ):
             return True
         elif (
-            int(Register, 16) >= ALARM_LOG_STARTING_REG
-            and int(Register, 16) <= ALARM_LOG_END_REG
+            RegisterInt >= ALARM_LOG_STARTING_REG
+            and RegisterInt <= ALARM_LOG_END_REG
             and self.EvolutionController
         ):
             return True
         elif (
-            int(Register, 16) >= NEXUS_ALARM_LOG_STARTING_REG
-            and int(Register, 16) <= NEXUS_ALARM_LOG_END_REG
+            RegisterInt >= NEXUS_ALARM_LOG_STARTING_REG
+            and RegisterInt <= NEXUS_ALARM_LOG_END_REG
             and (not self.EvolutionController)
         ):
             return True
-        elif int(Register, 16) == SERIAL_NUM_REG:
+        elif RegisterInt == SERIAL_NUM_REG:
+            return True
+        elif RegisterInt == IDENTITY_REG:
             return True
         return False
 
@@ -2240,6 +2473,11 @@ class Evolution(GeneratorController):
                 RegList.append({Register: Value})
 
             Register = "%04x" % SERIAL_NUM_REG
+            Value = self.GetRegisterValueFromList(Register)
+            if len(Value) != 0:
+                RegList.append({Register: Value})
+
+            Register = "%04x" % IDENTITY_REG
             Value = self.GetRegisterValueFromList(Register)
             if len(Value) != 0:
                 RegList.append({Register: Value})
@@ -2451,8 +2689,7 @@ class Evolution(GeneratorController):
                 return  # nothing new to report, return
 
             if (
-                self.Evolution2
-                and self.IgnoreUnknown
+                (self.Evolution2 or self.PowerZone200)
                 and not self.Reg0001IsValid(RegVal)
             ):
                 return
@@ -2504,11 +2741,10 @@ class Evolution(GeneratorController):
             
             msgbody += "\nIP Address: " + self.GetNetworkIp()
 
-            # if option enabled and evo 2.0 detected and result invalid, do not end email.
+            # if evo 2.0 or pz200 detected and result invalid, do not end email.
             sendMessage = True
             if (
-                self.Evolution2
-                and self.IgnoreUnknown
+                (self.Evolution2 or self.PowerZone200)
                 and not self.Reg0001IsValid(RegVal)
             ):
                 sendMessage = False
@@ -2702,10 +2938,25 @@ class Evolution(GeneratorController):
                     }
                 )
 
+            if self.PowerZone200:
+                ControllerSettings.append(
+                    {
+                        "Return to Utility Delay": self.ValueOut(
+                            self.GetParameter("0255", ReturnInt=True), "sec", JSONNum
+                        )
+                    }
+                )
+                ControllerSettings.append(
+                    {
+                        "Cool Down Time": self.ValueOut(
+                            self.GetParameter("0256", ReturnInt=True), "sec", JSONNum
+                        )
+                    }
+                )
             if not self.SmartSwitch:
                 Exercise = []
                 Exercise.append({"Exercise Time": self.GetExerciseTime()})
-                if self.EvolutionController and self.LiquidCooled:
+                if self.EvolutionController and self.LiquidCooled or self.PowerZone200:
                     Exercise.append({"Exercise Duration": self.GetExerciseDuration()})
                 Maintenance["Maintenance"].append({"Exercise": Exercise})
 
@@ -2967,6 +3218,18 @@ class Evolution(GeneratorController):
                 )
                 LogDict = self.MergeDicts(LogDict, LogOutput)
 
+            if self.PowerZone200 and RawOutput:
+                PowerZoneAlarmRegs = {}
+                for Register in range(POWER_ZONE_200_ALARM_REG,POWER_ZONE_200_ALARM_REG+POWER_ZONE_200_ALARM_LENGTH):
+                    RegStr = "%04x" % Register
+                    Value = self.GetRegisterValueFromList(RegStr)
+                    PowerZoneAlarmRegs[RegStr] = Value
+                for Register in range(POWER_ZONE_200_WARNING_REG,POWER_ZONE_200_WARNING_REG+POWER_ZONE_200_WARNING_LENGTH):
+                    RegStr = "%04x" % Register
+                    Value = self.GetRegisterValueFromList(RegStr)
+                    PowerZoneAlarmRegs[RegStr] = Value
+                LogDict = self.MergeDicts(LogDict, PowerZoneAlarmRegs)
+
             RetValue["Logs"] = LogDict
 
             UnknownFound = False
@@ -3079,9 +3342,14 @@ class Evolution(GeneratorController):
             0x2B: "Running - Utility Loss",  # Start / Stop Log
             0x2C: "Running - 2 Wire Start",  # Start / Stop Log
             0x2D: "Running - Remote Start",  # Start / Stop Log
-            0x2E: "Running - Exercise",  # Start / Stop Log
-            0x2F: "Stopped - Alarm"  # Start / Stop Log
+            0x2E: "Running - Exercise",     # Start / Stop Log
+            0x2F: "Stopped - Alarm",        # Start / Stop Log
             # Stopped Alarm
+            # PowerZone200
+            0x7f: "Ran with Outage",
+            0x80: "Ran with Remote Transfer",
+            0x81: "Enter Service Mode",
+            0x82: "Exit Service Mode"
         }
 
         # This should be the same for all Evo models , Not sure about service C, this may be a Nexus thing
@@ -3143,7 +3411,7 @@ class Evolution(GeneratorController):
             0x25: "VSCF Warning",
             0x26: "USB Warning",
             0x27: "Modbus Comms Failure Warning",
-            0x28: "Switched off",
+            0x28: "Switched Off",
             0x29: "Running-Manual",
             0x2a: "Stopped-Auto",
             0x2b: "Running-Utility Lost",
@@ -3151,6 +3419,18 @@ class Evolution(GeneratorController):
             0x2d: "Running-Radio Start",
             0x2e: "Running-Exercise",
             0x2f: "Stopped-Alarm",
+            0x30: "WIRING ERROR",  # Alarm code 2099
+            0x31: "Over Voltage",
+            0x32: "Under Voltage",
+            0x33: "Overload Remove Load",
+            0x34: "Low Volts Remove Load",
+            0x35: "Stepper Over Current",
+            0x36: "Fuse Problem",
+            0x37: "Ready to Run",                       # Power Zone 200
+            0x38: "Internal Exercise Cycle Skipped",    # Power Zone 200
+            0x39: "Loss of Speed Signal",
+            0x3A: "Loss of Serial Link ",
+            0x3B: "VSCF Alarm",
             0x3c: "Service B performed",
             0x3d: "Service A performed",
             0x3e: "Battery Inspected",
@@ -3372,7 +3652,10 @@ class Evolution(GeneratorController):
         else:
             DecoderLookup[NEXUS_ALARM_LOG_STARTING_REG] = NexusLCAlarmLogDecoder
 
-        DecoderLookup[START_LOG_STARTING_REG] = StartLogDecoder
+        if self.PowerZone200:
+            DecoderLookup[START_LOG_STARTING_REG] = self.MergeDicts(StartLogDecoder, AlarmLogDecoder_EvoLC)
+        else:
+            DecoderLookup[START_LOG_STARTING_REG] = StartLogDecoder
 
         if LogBase == NEXUS_ALARM_LOG_STARTING_REG and self.EvolutionController:
             self.LogError("Error in ParseLog: Invalid Base Register %X", LogBase)
@@ -3464,7 +3747,7 @@ class Evolution(GeneratorController):
                     Items = line.split("!")
                     if len(Items) != 5:
                         continue
-                    if Items[0] == str(int(ErrorCode, 16)):
+                    if int(Items[0]) == int(ErrorCode, 16):
                         if ReturnNameOnly:
                             outstr = Items[2]
                         else:
@@ -3509,6 +3792,7 @@ class Evolution(GeneratorController):
                 self.ModBus.ProcessTransaction(
                     "%04x" % SERIAL_NUM_REG, SERIAL_NUM_REG_LENGTH
                 )
+                self.DelayBetweenFrames()
             return ""
 
         # all nexus and evolution models should have all "f" for values.
@@ -3523,6 +3807,9 @@ class Evolution(GeneratorController):
     # ------------ Evolution:GetTransferStatus ----------------------------------
     def GetTransferStatus(self):
 
+        if self.PowerZone200:
+            return self.GetParameterBit("2166", 0x01, OnLabel="Generator", OffLabel="Utility")
+
         if not self.EvolutionController:
             return ""  # Nexus
 
@@ -3536,6 +3823,20 @@ class Evolution(GeneratorController):
     ##------------ Evolution:SystemInAlarm -------------------------------------
     def SystemInAlarm(self):
 
+        if self.PowerZone200:
+            Value = self.GetRegisterValueFromList("0637")   # Is alarm active?
+            if len(Value) != 4:
+                return False
+            RegVal = int(Value, 16)
+            if self.BitIsEqual(RegVal, 0x0001, 0x0001):
+                return True
+            Value = self.GetRegisterValueFromList("0638")   # Is alarm active?
+            if len(Value) != 4:
+                return False
+            RegVal = int(Value, 16)
+            if self.BitIsEqual(RegVal, 0x0001, 0x0001):
+                return True
+            return False
         AlarmState = self.GetAlarmState()
 
         if len(AlarmState):
@@ -3547,6 +3848,9 @@ class Evolution(GeneratorController):
 
     ##------------ Evolution:GetAlarmState -------------------------------------
     def GetAlarmState(self):
+
+        if self.PowerZone200:
+            return self.GetAlarmStatePowerZone200()
 
         strSwitch = self.GetSwitchState()
 
@@ -3633,13 +3937,111 @@ class Evolution(GeneratorController):
                 AlarmStr = self.GetAlarmInfo(Value, ReturnNameOnly=True)
                 if not "unknown" in AlarmStr.lower():
                     outString = AlarmStr
-
+            else:
+                self.LogDebug(f"Unabled to get error code for {Value}")
         return outString
 
+    # ------------ Evolution:GetAlarmStatePowerZone200 -------------------------
+    def GetAlarmStatePowerZone200(self):
+
+        if not self.PowerZone200:
+            return ""
+        if not self.SystemInAlarm():
+            return ""
+        
+        PowerZone200_Alarms = {
+            "2198": "Warning - BATTERY VOLT LOW",
+            "2199": "Warning - BATTERY PROBLEM",
+            "219a": "Warning - BATTERY CHARGER PROBLEM",
+            "219b": "Warning - BATTERY CHARGER AC MISSING",
+            "219c": "Warning - LID OPEN",
+            "219d": "Warning - SPI FLASH ABUSE",
+            "219e": "Warning - WIFI NO COMMS",
+            "219f": "Warning - EEPROM ABUSE",
+            "21a0": "Warning - RUPTURED BASIN",
+            "21a1": "Warning - LOW FUEL LEVEL",
+            "21a2": "Warning - HIGH COOLANT TEMP",
+            "21a3": "Warning - LOW COOLANT TEMP",
+            "21a4": "Warning - LOW OIL PRESSURE WARNING",
+            "21a5": "Warning - CRC MISMATCH",
+            "21a6": "Warning - HIGH FUEL LEVEL",
+            "21a7": "Warning - EXTERNAL CHARGER FAILURE",
+            "21a8": "Warning - BATTERY SYSTEM CONFIG ERROR",
+            "21a9": "Warning - EXTERNAL WARNING 1",
+            "21aa": "Warning - EXTERNAL WARNING 2",
+            "21ab": "Warning - FLUID BASIN OVERFILL",
+            "21ac": "Warning - FLUID BASIN MISSING",
+            "21ca": "Alarm - INTERNAL FAULT",
+            "21cb": "Alarm - EMERGENCY STOP",
+            "21cc": "Alarm - CAN ERROR",
+            "21cd": "Alarm - UNDERSPEED",
+            "21ce": "Alarm - UNDERVOLTAGE",
+            "21cf": "Alarm - OVERVOLTAGE",
+            "21d0": "Alarm - OVERSPEED",
+            "21d1": "Alarm - OVERCRANK",
+            "21d2": "Alarm - NO CRANK",
+            "21d3": "Alarm - OVERLOAD",
+            "21d4": "Alarm - HIGH COOLANT TEMP",
+            "21d5": "Alarm - HIGH OIL TEMP",
+            "21d6": "Alarm - LOW OIL PRESSURE",
+            "21d7": "Alarm - LOW COOLANT LEVEL",
+            "21d8": "Alarm - LOW OIL LEVEL",
+            "21d9": "Alarm - BOSCH ACTUATOR POSITION",
+            "21da": "Alarm - XFER SWITCH POSITION ERROR",
+            "21db": "Alarm - MISWIRE",
+            "21dc": "Alarm - TRANSFER CIRCUIT FAILED",
+            "21dd": "Alarm - 3 WIRE SWITCH POSITION ERROR",
+            "21de": "Alarm - KEYPAD MISSING",
+            "21df": "Alarm - DUALITY RUNNING RPM SENSOR LOSS",
+            "21e0": "Alarm - LOW FUEL LEVEL",
+            "21e1": "Alarm - BATTERY VOLT VERY LOW",
+            "21e2": "Alarm - INVALID VCODE CONFIG",
+            "21e3": "Alarm - MISSING CONFIG VCODE",
+            "21e4": "Alarm - MISSING CONFIG PARAM",
+            "21e5": "Alarm - MISSING CONFIG EXERCISE",
+            "21e6": "Alarm - MISSING CONFIG FUEL TYPE",
+            "21e7": "Alarm - DUIO EXTERNAL ALARM 1",
+            "21e8": "Alarm - DUIO EXTERNAL ALARM 2",
+            "21e9": "Alarm - DUIO EXTERNAL ALARM 3",
+            "21ea": "Alarm - GROUND FAULT",
+            "21eb": "Alarm - OVERLOAD FIELD CURRENT",
+            "21ec": "Alarm - OVERLOAD 300 PERCENT",
+            "21ed": "Alarm - DUIO 1 LOSS OF COMM",
+            "21ee": "Alarm - DUIO 2 LOSS OF COMM",
+            "21ef": "Alarm - DUIO 3 LOSS OF COMM",
+            "21f0": "Alarm - DUIO 4 LOSS OF COMM",
+            "21f1": "Alarm - Auxiliary Shutdown"
+        }
+        try:
+            alarm_list = []
+
+            for Register in range(POWER_ZONE_200_ALARM_REG, POWER_ZONE_200_ALARM_REG+POWER_ZONE_200_ALARM_LENGTH):
+                RegStr = "%04x" % Register
+                Value = self.GetRegisterValueFromList(RegStr)
+                if len(Value) != 4:
+                    return ""
+                RegVal = int(Value, 16)
+                if RegVal != 0:
+                    alarm_list.append(PowerZone200_Alarms.get(RegStr, f"UNKNOWN ALARM: {RegStr}:{RegVal:04x}"))
+
+            for Register in range(POWER_ZONE_200_WARNING_REG,POWER_ZONE_200_WARNING_REG+POWER_ZONE_200_WARNING_LENGTH):
+                RegStr = "%04x" % Register
+                Value = self.GetRegisterValueFromList(RegStr)
+                if len(Value) != 4:
+                    return ""
+                RegVal = int(Value, 16)
+                if RegVal != 0:
+                    alarm_list.append(PowerZone200_Alarms.get(RegStr, f"UNKNOWN WARNING: {RegStr}:{RegVal:04x}"))
+
+            return ", ".join(alarm_list)
+
+        except Exception as e1:
+            self.LogErrorLine(f"Error in GetAlarmStatePowerZone200: {e1}")
+            return ""
     # ------------ Evolution:Reg0001IsValid -------------------------------------
     def Reg0001IsValid(self, regvalue):
 
-        if regvalue & 0xFFF0FFC0:
+        if regvalue & 0xFFE0FFC0:
             return False
         return True
 
@@ -3677,6 +4079,13 @@ class Evolution(GeneratorController):
 
         try:
 
+            if self.PowerZone200:
+                # NOTE: 0x0017000 is not a state but a latching toggle for 
+                # Power Zone 200 only that can be signaled while in off 
+                # or auto mode
+                if regvalue == 0x00170000:
+                    return self.LastAlarmValue
+
             if not self.Evolution2:
                 return regvalue
 
@@ -3692,7 +4101,7 @@ class Evolution(GeneratorController):
                 0x6F670000,
                 0x6F67,
                 0x6538,
-                0x6538,
+                0x6538
             ]
 
             if not self.Reg0001IsValid(regvalue):
@@ -3885,6 +4294,8 @@ class Evolution(GeneratorController):
                 return "Cranking in Alarm"
             else:
                 return "Cranking"
+        elif self.BitIsEqual(RegVal, 0x001F0000, 0x000c0000):
+            return "Running - Warm Up"  # Power Zone 200
         elif self.BitIsEqual(RegVal, 0x001F0000, 0x000D0000):
             return "Cranking in Warning"
         elif self.BitIsEqual(RegVal, 0x001F0000, 0x000B0000):
@@ -3896,6 +4307,10 @@ class Evolution(GeneratorController):
                 return "Running in Alarm"
             else:
                 return "Running"
+        elif self.BitIsEqual(RegVal, 0x001F0000, 0x001b0000):
+                    return "Running Remote Transfer"  # Power Zone 200
+        elif self.BitIsEqual(RegVal, 0x001F0000, 0x00180000):
+                            return "Running - Utility Loss"  # Power Zone 200
         elif self.BitIsEqual(RegVal, 0x001F0000, 0x00090000):
             return "Stopped with Inhibit Active"
         elif self.BitIsEqual(RegVal, 0x001F0000, 0x00080000):
@@ -3964,6 +4379,13 @@ class Evolution(GeneratorController):
             RegVal = self.FilterReg0001(RegVal)
         else:
             RegVal = Reg0001Value
+        
+        if self.PowerZone200:
+            if self.BitIsEqual(RegVal, 0x001F0000, 0x00000000):
+                        self.LastSwitchMode = "Auto"
+            elif self.BitIsEqual(RegVal, 0x001F0000, 0x000F0000):
+                        self.LastSwitchMode = "Off"
+            return self.LastSwitchMode
 
         if self.BitIsEqual(RegVal, 0x0FFFF, 0x00):
             return "Auto"
@@ -4030,7 +4452,7 @@ class Evolution(GeneratorController):
 
         if not self.EvolutionController:
             return ""  # Not supported on Nexus
-        if not self.LiquidCooled:
+        if not self.LiquidCooled and not self.PowerZone200:
             return ""  # Not supported on Air Cooled
         # get exercise duration
         return self.GetParameter("023e", Label="min")
@@ -4245,7 +4667,16 @@ class Evolution(GeneratorController):
         except Exception as e1:
             self.LogErrorLine("Error in CheckExternalCTData: " + str(e1))
             return DefaultReturn
-    # ------------ Evolution:GetCurrentOutput -----------------------------------
+
+    # ------------ Evolution:IsThreePhase --------------------------------------
+    def IsThreePhase(self):
+        try:
+            if int(self.Phase) == 3:
+                return True
+        except:
+            return False
+        return False
+    # ------------ Evolution:GetCurrentOutput ----------------------------------
     def GetCurrentOutput(self, ReturnFloat=False, force_sensor = False, leg = None):
         # leg is None, "ct1" or "ct2"
 
@@ -4281,7 +4712,22 @@ class Evolution(GeneratorController):
                 # only EvoAC will return two legs
                 return DefaultReturn
 
-            if self.EvolutionController and self.LiquidCooled:
+            if self.PowerZone200:
+                Value = self.GetRegisterValueFromList("1f75")  # L1 Amps
+                Value2 = self.GetRegisterValueFromList("1f76")  # L2 Amps
+                if len(Value) and len(Value2):
+                    CurrentLeg1 = int(Value, 16) / 100.0
+                    CurrentLeg2 = int(Value2, 16) / 100.0
+                    if leg == "ct1":
+                        CurrentFloat = round(float(CurrentLeg1),2)
+                    elif leg == "ct2":
+                        CurrentFloat = round(float(CurrentLeg2),2)
+                    else:
+                        CurrentFloat = round(CurrentLeg1 + CurrentLeg2,2)
+                else:
+                    CurrentFloat = 0.0
+                CurrentOutput = CurrentFloat
+            elif self.EvolutionController and self.LiquidCooled:
                 Value = self.GetRegisterValueFromList("0058")  # Hall Effect Sensor
                 DebugInfo += Value
                 if len(Value):
@@ -4490,6 +4936,12 @@ class Evolution(GeneratorController):
         ):
             return DefaultReturn
 
+        if self.PowerZone200:
+            if ReturnFloat:
+                return round(self.GetParameter("2134", ReturnFloat=ReturnFloat, Divider=10.0, Label="kW"),2)
+            else:
+                return self.GetParameter("2134", ReturnFloat=ReturnFloat, Divider=10.0, Label="kW")
+        
         ReturnValue = self.CheckExternalCTData(request="power", ReturnFloat=ReturnFloat)
         if ReturnValue != None:
             return ReturnValue
@@ -4519,6 +4971,7 @@ class Evolution(GeneratorController):
                     self.EvolutionController
                     and self.LiquidCooled
                     or self.SynergyController
+                    or self.PowerZone200
                 ):
                     return self.GetParameter(
                         "0008", ReturnFloat=ReturnFloat, Divider=10.0, Label="Hz"
@@ -4745,6 +5198,17 @@ class Evolution(GeneratorController):
     # ------------ Evolution:ServiceIsDue ---------------------------------------
     def ServiceIsDue(self, AlarmOnly=False):
 
+        if self.PowerZone200:
+            Value = self.GetRegisterValueFromList("0639")
+            if len(Value) != 4:
+                return False
+            RegVal = int(Value, 16)
+            if self.BitIsEqual(RegVal, 0x0001, 0x0001):
+                # is Maintenance due
+                return True
+            else:
+                return False
+
         # get Hours until next service
         Value = self.GetRegisterValueFromList("0001")
         if len(Value) != 8:
@@ -4755,12 +5219,12 @@ class Evolution(GeneratorController):
         RegVal = self.FilterReg0001(RegVal)
 
         # service A due alarm?
-        if self.BitIsEqual(RegVal, 0xFFF0FFFF, 0x0000001F):
+        if self.BitIsEqual(RegVal, 0x0000003F, 0x0000001F):
             # is the Service Due A Alarm Active?
             return True
 
         # service B due alarm?
-        if self.BitIsEqual(RegVal, 0xFFF0FFFF, 0x00000020):
+        if self.BitIsEqual(RegVal, 0x0000003F, 0x00000020):
             # is the Service Due B Alarm Active?
             return True
         if AlarmOnly:
@@ -4993,7 +5457,7 @@ class Evolution(GeneratorController):
 
         try:
             RunHours = None
-            if not self.EvolutionController or not self.LiquidCooled:
+            if not self.EvolutionController or not self.LiquidCooled and not self.PowerZone200:
                 # get total hours running
                 RunHours = self.GetParameter("000b", ReturnInt=True)
                 if self.AdditionalRunHours != None:
@@ -5101,6 +5565,8 @@ class Evolution(GeneratorController):
                     if self.EngineDisplacement == "2.3 L" or self.EngineDisplacement == "2.4 L":
                         Outage["Outage"].append({"Preheat Time": self.UnitsOut(self.GetPreheatTime(), type=int, NoString=JSONNum)})
 
+            if self.PowerZone200:
+                Outage["Outage"].append({"Elapsed Run Minutes for Current Run": self.ValueOut(self.GetParameter("2137", ReturnInt= True), "min", JSONNum)})
 
             Outage["Outage"].append({"Outage Log": self.DisplayOutageHistory(JSONNum=JSONNum)})
 
@@ -5159,7 +5625,7 @@ class Evolution(GeneratorController):
             if self.EvolutionController and self.LiquidCooled:
                 Engine.append({"Battery Status": self.GetBatteryStatus()})
 
-            if self.EvolutionController and not self.PowerPact and not self.SynergyController:
+            if self.EvolutionController and not self.PowerPact and not self.SynergyController and not self.PowerZone200:
                 Engine.append(
                     {"Battery Charger Current": self.ValueOut(
                         self.GetParameter("05ee", ReturnInt= True), "mA", JSONNum
@@ -5186,18 +5652,42 @@ class Evolution(GeneratorController):
                         )
                     }
                 )
+            if self.PowerZone200:
+                Engine.append({"Output Voltage L1": self.ValueOut(
+                        self.GetParameter("1f72", ReturnInt=True), "V", JSONNum)})
+                Engine.append({"Output Voltage L2": self.ValueOut(
+                        self.GetParameter("1f73", ReturnInt=True), "V", JSONNum)})
+                if self.IsThreePhase():
+                    Engine.append({"Output Voltage L3": self.ValueOut(
+                            self.GetParameter("1f74", ReturnInt=True), "V", JSONNum)})
 
             if self.PowerMeterIsSupported():
                 Engine.append({"Output Current": self.ValueOut(self.GetCurrentOutput(ReturnFloat=True), "A", JSONNum)})
                 if self.EvolutionController and not self.LiquidCooled and not self.bDisablePowerLog:
                     Engine.append({"Current L1": self.ValueOut(self.GetCurrentOutput(ReturnFloat=True, force_sensor=False, leg = "ct1"), "A", JSONNum)})
                     Engine.append({"Current L2": self.ValueOut(self.GetCurrentOutput(ReturnFloat=True, force_sensor=False, leg = "ct2"), "A", JSONNum)})
-
+                    if self.IsThreePhase() and self.PowerZone200:
+                        Engine.append({"Current L3": self.ValueOut(
+                                        self.GetParameter("1f77", ReturnFloat=True, Divider=100), "V", JSONNum)})
                 if self.UseExternalCTData and self.LiquidCooled and self.EvolutionController:
                     # show the internal Hall sensor if external CTs are used. If no external CTs are present, then this is shown with "Output Current"
                     Engine.append({"Hall Effect Sensor": self.ValueOut(self.GetCurrentOutput(ReturnFloat=True, force_sensor=True), "A", JSONNum)})
 
                 Engine.append({"Output Power (Single Phase)": self.ValueOut(self.GetPowerOutput(ReturnFloat=True), "kW", JSONNum)})
+
+            if self.PowerZone200:
+                Engine.append({"Power Factor": self.ValueOut(
+                        self.GetParameter("1f7b", ReturnFloat=True, Divider=100), "", JSONNum)})
+                Engine.append({"Engine Load": self.ValueOut(
+                        self.GetParameter("060c", ReturnInt=True), "%", JSONNum)})
+                Engine.append({"Intake Temperature": self.ValueOut(
+                        self.GetParameter("0608", ReturnInt=True), "F", JSONNum)})
+                Engine.append({"Oil Level": self.ValueOut(
+                        self.GetParameter("2008", ReturnInt=True), "", JSONNum)})
+                Engine.append({"Fuel Pressure (Cranking)": self.ValueOut(
+                        self.GetParameter("0613", ReturnInt=True), "", JSONNum)})
+                Engine.append({"Fuel Pressure (Running)": self.ValueOut(
+                        self.GetParameter("0614", ReturnInt=True), "", JSONNum)})
 
             Engine.append(
                 {
@@ -5210,16 +5700,20 @@ class Evolution(GeneratorController):
             if self.bDisplayExperimentalData:
                 Engine.append({"Experimental Sensors": self.DisplayExperimentalSensors()})
 
-            if self.EvolutionController and self.LiquidCooled:
+            if self.EvolutionController and self.LiquidCooled or self.PowerZone200:
                 Line.append({"Transfer Switch State": self.GetTransferStatus()})
 
-            Line.append(
-                {
-                    "Utility Voltage": self.ValueOut(
-                        self.GetUtilityVoltage(ReturnInt=True), "V", JSONNum
-                    )
-                }
-            )
+            Line.append({"Utility Voltage": self.ValueOut(
+                    self.GetUtilityVoltage(ReturnInt=True), "V", JSONNum)})
+
+            if self.PowerZone200:
+                Line.append({"Utility Voltage L1": self.ValueOut(
+                        self.GetParameter("1fa4", ReturnInt=True), "V", JSONNum)})
+                Line.append({"Utility Voltage L2": self.ValueOut(
+                        self.GetParameter("1fa5", ReturnInt=True), "V", JSONNum)})
+                if self.IsThreePhase():
+                    Line.append({"Utility Voltage L3": self.ValueOut(
+                            self.GetParameter("1fa6", ReturnInt=True), "V", JSONNum)})
             #
             Line.append(
                 {
@@ -5325,10 +5819,10 @@ class Evolution(GeneratorController):
             StartInfo["FuelSensor"] = self.FuelSensorSupported()
             StartInfo["FuelConsumption"] = self.FuelConsumptionSupported()
             StartInfo["UtilityVoltage"] = True
-            StartInfo["RemoteCommands"] = not self.SmartSwitch  # Start and Stop
+            StartInfo["RemoteCommands"] = not self.SmartSwitch  and not self.PowerZone200 # Start and Stop
             StartInfo["ResetAlarms"] = EvoLC or Evo2
             StartInfo["AckAlarms"] = False
-            StartInfo["RemoteTransfer"] = not self.SmartSwitch  # Start / Transfer
+            StartInfo["RemoteTransfer"] = not self.SmartSwitch  and not self.PowerZone200 # Start / Transfer
             StartInfo["RemoteButtons"] = self.RemoteButtonsSupported()  # On, Off , Auto
             StartInfo["ExerciseControls"] = not self.SmartSwitch
             StartInfo["WriteQuietMode"] = EvoLC
@@ -5371,8 +5865,14 @@ class Evolution(GeneratorController):
     # -------------Evolution:SetupButtons---------------------------------------
     def SetupButtons(self):
         try:
+            FileName = None
+
             if self.EvolutionController and self.LiquidCooled:
                 FileName = "EvoLC_commands.json"
+            elif self.PowerZone200:
+                FileName = "PowerZone200_commands.json"
+            
+            if FileName != None:
                 ConfigFileName = os.path.join(
                     os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
                     "data",
@@ -5504,7 +6004,7 @@ class Evolution(GeneratorController):
 
         if self.Evo45L:
             return False
-        
+
         if self.EvolutionController and self.LiquidCooled:
             return True
         return False

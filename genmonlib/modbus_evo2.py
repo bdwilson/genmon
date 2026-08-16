@@ -98,7 +98,7 @@ class ModbusEvo2(ModbusProtocol):
                 b"\xC7\x39\x70\xD5\xFC\xCA\x43\x0C\x8E\xCD\xEA\x54\xAF\x88\xA3\x67",
             ]
 
-            self.LogDebug("KeySize = " + str(len(self.key[0])))
+            #self.LogDebug("KeySize = " + str(len(self.key[0])))
             self.crypto = MyCrypto(
                 log=self.log, console=self.console, key=self.key[0], iv=self.iv
             )
@@ -127,11 +127,11 @@ class ModbusEvo2(ModbusProtocol):
         return self._PT(Register, Length, skipupdate, ReturnString)
 
     # -------------ModbusProtocol::ProcessWriteTransaction-----------------------
-    def ProcessWriteTransaction(self, Register, Length, Data):
+    def ProcessWriteTransaction(self, Register, Length, Data, IsCoil = False, IsSingle = False):
         if self.Encapsulating():
             self.SendUnlockSequence(Register, Length, Data)
 
-        return self._PWT(Register, Length, Data)
+        return self._PWT(Register, Length, Data, IsCoil = IsCoil, IsSingle=IsSingle)
 
     # -------------ModbusEvo2::SendUnlockSequence--------------------------------
     # Send unlock sequence if it has not been sent in the last 5 min

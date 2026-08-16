@@ -18,7 +18,10 @@ class MyThread:
     # ---------- MyThread::MyThread---------------------------------------------
     def __init__(self, ThreadFunction, Name=None, start=True):
         self.StopEvent = threading.Event()
+        if Name == None:
+            Name = ThreadFunction.__name__
         self.ThreadObj = threading.Thread(target=ThreadFunction, name=Name)
+        self.Name = Name
         self.ThreadObj.daemon = True
         if start:
             self.Start()
@@ -51,6 +54,8 @@ class MyThread:
     def Name(self):
         return self.ThreadObj.name
 
-    # ---------- MyThread::Name-------------------------------------------------
+    # ---------- MyThread::WaitForThreadToEnd-----------------------------------
     def WaitForThreadToEnd(self, Timeout=None):
         return self.ThreadObj.join(Timeout)
+
+

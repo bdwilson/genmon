@@ -90,6 +90,12 @@ class MySupport(MyCommon):
                 log.error("Error in CopyFile : " + str(source) + " : " + str(e1))
             return False
 
+    # ------------ MySupport::SwapWords32---------------------------------------
+    def SwapWords32(self, val):
+        # Mask and shift the lower 16 bits to the left, and upper 16 bits to the right
+        # Little-Endian Word Swap
+        return ((val & 0xFFFF) << 16) | ((val >> 16) & 0xFFFF)
+
     # ------------ MySupport::GetSiteName----------------------------------------
     def GetSiteName(self):
         return self.SiteName
@@ -176,7 +182,7 @@ class MySupport(MyCommon):
                 MyThreadObj.Stop()
                 MyThreadObj.WaitForThreadToEnd()
         except Exception as e1:
-            self.LogError("Error in KillThread ( " + Name + "): " + str(e1))
+            self.LogError(f"Error in KillThread ({Name}): " + str(e1))
             return
 
     # ---------------------MySupport::StartAllThreads----------------------------
@@ -206,11 +212,18 @@ class MySupport(MyCommon):
         return Thread.StopSignaled()
 
     # ---------- MySupport::WaitForExit-----------------------------------------
-    def WaitForExit(self, Name, timeout=None):
+    def WaitForExit(self, Name = None, timeout=None, ignoreerror = False):
+
+        # If called without a specific thread name
+        if Name == None:
+            ThreadObj = threading.current_thread()
+            Name = ThreadObj.name
 
         Thread = self.Threads.get(Name, None)
         if Thread == None:
-            self.LogError("Error getting thread name in WaitForExit: " + Name)
+            if ignoreerror == False:
+                self.LogError(f"Error getting thread name in WaitForExit: ({Name})")
+            time.sleep(timeout)
             return False
 
         return Thread.Wait(timeout)
@@ -516,6 +529,18 @@ class MySupport(MyCommon):
             self.LogErrorLine("Error in ReadCSVFile: " + FileName + " : " + str(e1))
             return []
 
+    #-------------------------KohlerRDCProtocol:InternetActive------------------
+    def InternetActive(self):
+        try:
+            socket.setdefaulttimeout(3)
+            socket.create_connection(("8.8.8.8", 53), timeout=3).close()
+            return True
+        except OSError:
+            return False
+        except Exception as e1:
+            self.LogErrorLine(f"Error in InternetActive: {e1}")
+            return False
+    
     # ------------ MySupport::GetWANIp-------------------------------------------
     def GetWANIp(self):
 

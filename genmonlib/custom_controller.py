@@ -433,10 +433,12 @@ class CustomController(GeneratorController):
 
             if "holding_registers" in self.controllerimport.keys():
                 for Register, RegisterData in self.controllerimport["holding_registers"].items():
+                    if Register.lower().startswith("comment"):
+                        continue
                     if isinstance(RegisterData, dict):
-                        Length = RegisterData["length"]
+                        Length = int(RegisterData["length"])
                     else:
-                        Length = RegisterData
+                        Length = int(RegisterData)
                     if Length % 2 != 0:
                         self.LogError(
                             "Error: Controller Import: modbus register lenghts must be divisible by 2 (holding_registers): "
@@ -447,6 +449,8 @@ class CustomController(GeneratorController):
                         return False
             if "input_registers" in self.controllerimport.keys():
                 for Register, RegisterData in self.controllerimport["input_registers"].items():
+                    if Register.lower().startswith("comment"):
+                        continue
                     if isinstance(RegisterData, dict):
                         Length = RegisterData["length"]
                     else:
@@ -462,6 +466,8 @@ class CustomController(GeneratorController):
 
             if "coil_registers" in self.controllerimport.keys():
                 for Register, RegisterData in self.controllerimport["coil_registers"].items():
+                    if Register.lower().startswith("comment"):
+                        continue
                     if isinstance(RegisterData, dict):
                         Length = RegisterData["length"]
                     else:
@@ -577,13 +583,22 @@ class CustomController(GeneratorController):
                     elif sensor["sensor"].lower() == "linevolts":
                         nominal = self.NominalLineVolts
                     elif sensor["sensor"].lower() == "frequency":
-                        nominal = int(self.NominalFreq)
+                        try:
+                            nominal = int(self.NominalFreq)
+                        except:
+                            nominal = 60
                     elif sensor["sensor"].lower() == "batteryvolts":
-                        nominal = self.NominalBatteryVolts
+                        try:
+                            nominal = self.NominalBatteryVolts
+                        except:
+                            nominal = 12
                     elif sensor["sensor"].lower() == "rpm":
-                        nominal = int(self.NominalRPM)
+                        try:
+                            nominal = int(self.NominalRPM)
+                        except:
+                            nominal = 1800
                     elif sensor["sensor"].lower() == "current":
-                        nominal = (float(self.NominalKW) * 1000) / self.NominalLineVolts
+                        nominal = round((float(self.NominalKW) * 1000) / self.NominalLineVolts,0)
                     else:
                         nominal = None
                         self.LogError("Nominal is unknown for type " + sensor["sensor"])
@@ -597,6 +612,13 @@ class CustomController(GeneratorController):
                             units = self.ProcessTemperatureModifier(sensor, sensor["units"], units = True)
                     else:
                         nominal = sensor["nominal"]
+                
+                if maximum == None:
+                    maximum = round(nominal * 1.25, 0)
+                    #self.LogDebug(f"SetupTiles: Max set to {sensor["sensor"].lower()}: {maximum}, nominal {nominal}")
+                #else:
+                    #self.LogDebug(f"SetupTiles: not set Max to {sensor["sensor"].lower()}:{maximum}, nominal {nominal}")
+
                 Tile = MyTile(
                     self.log,
                     title=sensor["title"],
@@ -637,6 +659,8 @@ class CustomController(GeneratorController):
                 return False, 0, ""
             RegInt = int(Register,16)
             for LogRegister, LogRegisterData in self.controllerimport["log_registers"].items():
+                if LogRegister.lower().startswith("comment"):
+                        continue
                 LogRegInt = int(LogRegister,16)
                 LogRegEndOffset = int(LogRegisterData["step"]) * int(LogRegisterData["iteration"])
                 if RegInt >= LogRegInt and RegInt <= (LogRegInt + LogRegEndOffset):
@@ -646,7 +670,7 @@ class CustomController(GeneratorController):
             self.LogErrorLine("Error in RegisterIsLog: " + str(e1))
             return False, 0, ""
 
-    # -------------CustomController:MasterEmulation------------------------------ 
+    # -------------CustomController:UpdateLogRegistersAsMaster------------------
     def UpdateLogRegistersAsMaster(self):
         try:
             if not "log_registers" in self.controllerimport.keys():
@@ -657,6 +681,8 @@ class CustomController(GeneratorController):
                 if not self.ConfigValidated:
                     return
             for Register, RegisterData in self.controllerimport["log_registers"].items():
+                if Register.lower().startswith("comment"):
+                        continue
                 if not isinstance(RegisterData, dict):
                     self.LogDebug("Invalid register data in log register description")
                     return
@@ -681,6 +707,7 @@ class CustomController(GeneratorController):
                             or localTimeoutCount != self.ModBus.ComTimoutError
                         ) and self.ModBus.RxPacketCount:
                             self.WaitAndPergeforTimeout()
+                        self.DelayBetweenFrames()
                         RegisterInt += Step
                         Iteration -= 1
 
@@ -700,6 +727,8 @@ class CustomController(GeneratorController):
                     return
             if "holding_registers" in self.controllerimport.keys():
                 for Register, RegisterData in self.controllerimport["holding_registers"].items():
+                    if Register.lower().startswith("comment"):
+                        continue
                     if isinstance(RegisterData, dict):
                         Length = RegisterData["length"]
                     else:
@@ -715,11 +744,14 @@ class CustomController(GeneratorController):
                             or localTimeoutCount != self.ModBus.ComTimoutError
                         ) and self.ModBus.RxPacketCount:
                             self.WaitAndPergeforTimeout()
+                        self.DelayBetweenFrames()
                     except Exception as e1:
                         self.LogErrorLine("Error in MasterEmulation (holding): " + str(e1))
 
             if "input_registers" in self.controllerimport.keys():
                 for Register, RegisterData in self.controllerimport["input_registers"].items():
+                    if Register.lower().startswith("comment"):
+                        continue
                     if isinstance(RegisterData, dict):
                         Length = RegisterData["length"]
                     else:
@@ -735,11 +767,14 @@ class CustomController(GeneratorController):
                             or localTimeoutCount != self.ModBus.ComTimoutError
                         ) and self.ModBus.RxPacketCount:
                             self.WaitAndPergeforTimeout()
+                        self.DelayBetweenFrames()
                     except Exception as e1:
                         self.LogErrorLine("Error in MasterEmulation (input): " + str(e1))
 
             if "coil_registers" in self.controllerimport.keys():
                 for Register, RegisterData in self.controllerimport["coil_registers"].items():
+                    if Register.lower().startswith("comment"):
+                        continue
                     if isinstance(RegisterData, dict):
                         Length = RegisterData["length"]
                     else:
@@ -756,6 +791,7 @@ class CustomController(GeneratorController):
                             or localTimeoutCount != self.ModBus.ComTimoutError
                         ) and self.ModBus.RxPacketCount:
                             self.WaitAndPergeforTimeout()
+                        self.DelayBetweenFrames()
                     except Exception as e1:
                         self.LogErrorLine("Error in MasterEmulation (coil): " + str(e1))
 
@@ -926,7 +962,7 @@ class CustomController(GeneratorController):
                     return False
                 return True
             else:
-                #self.LogDebug("Error in ValidateRegister: register " + str(Register) + " not in " + str(type))
+                self.LogDebug("Error in ValidateRegister: register " + str(Register) + " not in " + str(type))
                 return False
         except Exception as e1:
             self.LogErrorLine("Error in ValidateRegister: " + str(e1))
@@ -937,8 +973,7 @@ class CustomController(GeneratorController):
         # return JSON of dict with registers and text descriptions
         try:
             ReturnDict = {}
-            # todo: this presently does not support displaying multiple types of registers
-            # this should be fixed
+            # 
             if "holding_registers" in self.controllerimport.keys():
                 HoldingRegLabels = {}
                 for Register in self.Holding.keys():
@@ -1301,7 +1336,7 @@ class CustomController(GeneratorController):
             Time.append({"Monitor Time": datetime.datetime.now().strftime("%A %B %d, %Y %H:%M:%S")})
             if "datetime" in self.controllerimport.keys():
                 retval, gentime =  self.GetSingleEntry("datetime")
-                if retval:
+                if retval or len(gentime) == 0:
                     Time.append({"Generator Time": gentime})
 
         except Exception as e1:
@@ -1708,6 +1743,7 @@ class CustomController(GeneratorController):
                         if value == int(entry["value"], 16):
                             ReturnValue = entry["text"]
                     else:
+                        value = self.ProcessEndianModifiers(entry, value)
                         value = self.ProcessSignedModifier(entry, value)
                         value = self.ProcessBitModifiers(entry, value)
                         if "bounds_regex" in entry.keys():
@@ -1717,6 +1753,7 @@ class CustomController(GeneratorController):
                             ReturnValue = self.ProcessExecModifier(entry, int(self.ProcessTemperatureModifier(entry, value)))
                 elif entry["type"] == "float":
                     ReturnValue = self.config.ReadValue(Register, return_type=float, default=ReturnValue)
+                    value = self.ProcessEndianModifiers(entry, value)
                     value = self.ProcessMaskModifier(entry, value)
                     value = self.ProcessBitModifiers(entry, value, ReturnFloat=True)
                     value = self.ProcessTemperatureModifier( entry, value)
@@ -1732,6 +1769,7 @@ class CustomController(GeneratorController):
             
             if entry["type"] == "bits":
                 value = self.GetParameter(Register, ReturnInt=True, IsCoil=IsCoil, IsInput=IsInput)
+                value = self.ProcessEndianModifiers(entry, value)
                 value = self.ProcessMaskModifier(entry, value)
                 if value == int(entry["value"], 16):
                     ReturnValue = entry["text"]
@@ -1747,12 +1785,14 @@ class CustomController(GeneratorController):
                         logical_value = True
                 else:
                     logical_value = True
+                value = self.ProcessEndianModifiers(entry, value)
                 value = self.ProcessMaskModifier(entry, value)
                 value = self.ProcessBitModifiers(entry, value)
                 if (not (value == 0)) == logical_value:
                     ReturnValue = entry["text"]
             elif entry["type"] == "float":
                 value = self.GetParameter(Register, ReturnInt=True, IsCoil=IsCoil, IsInput=IsInput)
+                value = self.ProcessEndianModifiers(entry, value)
                 value = self.ProcessMaskModifier(entry, value)
                 value = self.ProcessSignedModifier(entry, value)
                 value = self.ProcessBitModifiers(entry, value, ReturnFloat=True)
@@ -1765,6 +1805,7 @@ class CustomController(GeneratorController):
                     ReturnValue = self.ProcessExecModifier(entry, float(value))
             elif entry["type"] == "int":
                 value = self.GetParameter(Register, ReturnInt=True, IsCoil=IsCoil, IsInput=IsInput)
+                value = self.ProcessEndianModifiers(entry, value)
                 value = self.ProcessMaskModifier(entry, value)
                 value = self.ProcessSignedModifier(entry, value)
                 value = self.ProcessBitModifiers(entry, value)
@@ -1776,6 +1817,7 @@ class CustomController(GeneratorController):
             elif entry["type"] == "regex":
                 regex_pattern = entry["regex"]
                 value = self.GetParameter(Register, ReturnInt=True, IsCoil=IsCoil, IsInput=IsInput)
+                value = self.ProcessEndianModifiers(entry, value)
                 value = self.ProcessMaskModifier(entry, value)
                 value = self.ProcessBitModifiers(entry, value)
                 value = "%x" % value
@@ -1804,6 +1846,7 @@ class CustomController(GeneratorController):
                         ReturnValue = separator.join(value_list)
             elif entry["type"] == "object_int_index":
                 value = self.GetParameter(Register, ReturnInt=True, IsCoil=IsCoil, IsInput=IsInput)
+                value = self.ProcessEndianModifiers(entry, value)
                 value = self.ProcessMaskModifier(entry, value)
                 value = self.ProcessBitModifiers(entry, value)
                 if "default" in entry.keys():
@@ -1814,6 +1857,7 @@ class CustomController(GeneratorController):
 
             elif entry["type"] == "object_bit_index":
                 value = self.GetParameter(Register, ReturnInt=True, IsCoil=IsCoil, IsInput=IsInput)
+                value = self.ProcessEndianModifiers(entry, value)
                 value = self.ProcessMaskModifier(entry, value)
                 value = self.ProcessBitModifiers(entry, value)
                 if "default" in entry.keys():
@@ -1868,10 +1912,23 @@ class CustomController(GeneratorController):
         except Exception as e1:
             self.LogErrorLine("Error in ProcessRoundModifiers: " + str(e1) + ": " + str(entry["title"]))
             return value
+    # ------------ GeneratorController:ProcessEndianModifiers -------------------
+    def ProcessEndianModifiers(self, entry, value, ReturnFloat = False):
+        try:
+            if "swapwords32" in entry.keys():
+                # change from 01234567 to 456701234
+                if entry["swapwords32"] == True:
+                    value = self.SwapWords32(value)
+            return value
+        except Exception as e1:
+            self.LogErrorLine("Error in ProcessEndianModifiers: " + str(e1) + ": " + str(entry["title"]))
+            return value
+
     # ------------ GeneratorController:ProcessBitModifiers ----------------------
     def ProcessBitModifiers(self, entry, value, ReturnFloat = False):
         try:
             orignialvalue = value
+
             if "shiftright" in entry.keys():
                 value = value >> int(entry["shiftright"])
             if "shiftleft" in entry.keys():
@@ -1990,7 +2047,7 @@ class CustomController(GeneratorController):
 
         except Exception as e1:
             self.LogErrorLine("Error in ProcessExecModifier: " + str(e1) + ": " + str(entry["title"]))
-            self.LogDebug(exec_string)
+            self.LogDebug(f"ProcessExecModifier exec_string: {exec_string}")
             return ReturnValue
     
     # ------------ GeneratorController:ProcessTemperatureModifier --------------

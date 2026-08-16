@@ -710,7 +710,7 @@ input, select, textarea { font: inherit; color: inherit; }
 
 /* ---------- Page header ------------------------------------- */
 .page-title {
-  font-size: 1.15rem; font-weight: 700; margin-bottom: 6px;
+  font-size: 1.15rem; font-weight: 700; margin: 0 0 6px;
   display: flex; align-items: center; gap: 8px;
 }
 .page-title svg { width: 22px; height: 22px; color: var(--accent); }
@@ -765,9 +765,38 @@ input, select, textarea { font: inherit; color: inherit; }
   display: flex; align-items: center; gap: 8px;
   padding: 12px 16px; border-bottom: 1px solid var(--border);
   font-weight: 600; font-size: .92rem;
+  margin: 0;
 }
 .card-body { padding: 16px; }
 .card-footer { padding: 12px 16px; border-top: 1px solid var(--border); }
+
+/* ---------- Logs page lists --------------------------------- */
+.logs-list {
+  list-style: none; margin: 0; padding: 0;
+}
+.logs-entry {
+  padding: 6px 0; font-size: .85rem;
+  border-bottom: 1px solid var(--border);
+}
+.logs-entry:last-child { border-bottom: none; }
+[data-theme~="dark"] .logs-entry {
+  border-bottom-color: rgba(55,75,110,.25);
+}
+/* Flex on inner row only — keeps <li> a normal listitem for screen readers */
+.logs-entry-row {
+  display: flex; flex-wrap: wrap; gap: 6px 10px;
+}
+.logs-entry-time {
+  flex-shrink: 0; font-family: var(--mono, ui-monospace, monospace);
+  font-size: .8rem; color: var(--text-2); font-variant-numeric: tabular-nums;
+}
+.logs-entry-msg {
+  flex: 1; min-width: 12rem; color: var(--text-0); word-break: break-word;
+}
+.logs-count-badge {
+  font-size: .7rem; margin-left: 6px; background: var(--bg-3);
+  padding: 2px 8px; border-radius: 10px;
+}
 
 /* ---------- Dashboard tile grid ----------------------------- */
 .dash-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
@@ -797,7 +826,7 @@ input, select, textarea { font: inherit; color: inherit; }
 .tile-title {
   font-size: .72rem; font-weight: 600; color: var(--text-2);
   text-transform: uppercase; letter-spacing: .5px;
-  margin-bottom: 3px; text-align: center;
+  margin: 0 0 3px; text-align: center;
 }
 .tile-gauge { flex: 1; display: flex; align-items: center; justify-content: center; width: 100%; }
 .tile-value {
@@ -805,10 +834,13 @@ input, select, textarea { font: inherit; color: inherit; }
   margin-top: 1px; color: var(--text-0);
 }
 .tile-value .unit { font-size: .75rem; font-weight: 400; color: var(--text-2); margin-left: 2px; }
-/* Hide external value for dial-type gauges (value shown inside the dial) */
+/* Dial gauges show the value in the SVG; keep .tile-value for AT (not display:none) */
 .tile[data-gtype="radial"] .tile-value,
 .tile[data-gtype="arc"] .tile-value,
-.tile[data-gtype="fuel"] .tile-value { display: none; }
+.tile[data-gtype="fuel"] .tile-value {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0,0,0,0); border: 0;
+}
 /* HBar: tighter spacing */
 .tile[data-gtype="hbar"] .tile-value { margin-top: 0; }
 
@@ -827,8 +859,9 @@ input, select, textarea { font: inherit; color: inherit; }
 }
 .tile-subs {
   display: flex; flex-wrap: wrap; gap: 1px 8px; justify-content: center;
-  margin-top: 4px; padding-top: 4px;
+  margin: 4px 0 0; padding: 4px 0 0;
   border-top: 1px solid var(--border);
+  list-style: none;
 }
 .tile-sub {
   display: flex; flex-direction: column; align-items: center;
@@ -980,6 +1013,16 @@ input, select, textarea { font: inherit; color: inherit; }
 .wifi-arc-on  { opacity: 1; }
 .wifi-pct { font-size: 1.3rem; font-weight: 700; line-height: 1.1; }
 .wifi-dbm { font-size: .65rem; color: var(--text-2); margin-bottom: 2px; }
+
+/* WiFi tile: swap between the bars view (default) and the scientific dBm dial */
+.tile-wifi .wifi-view-dial { display: none; }
+.tile-wifi[data-gtype="wifidial"] .wifi-view-bars { display: none; }
+.tile-wifi[data-gtype="wifidial"] .wifi-view-dial { display: flex; padding: 2px 0; }
+.tile-wifi[data-gtype="wifidial"] .wifi-dbm { display: none; }  /* dial LCD already shows dBm */
+/* Wider Bars/Dial picker buttons (text instead of a glyph) */
+.gauge-pick-btn.wide {
+  width: auto; padding: 0 7px; font-size: .58rem; text-transform: none;
+}
 
 /* --- Tile edit controls (visible in edit mode) --- */
 .tile-edit-controls {
@@ -1227,9 +1270,17 @@ input, select, textarea { font: inherit; color: inherit; }
 .status-panel { padding: 16px; }
 .status-section { margin-bottom: 12px; }
 .status-section:last-child { margin-bottom: 0; }
+.status-section-hdr {
+  margin: 0 0 6px; padding: 0; font-size: inherit; font-weight: inherit;
+}
 .status-section-title {
   font-weight: 600; font-size: .88rem; color: var(--accent);
-  margin-bottom: 6px; cursor: pointer; display: flex; align-items: center; gap: 6px;
+  cursor: pointer; display: flex; align-items: center; gap: 6px;
+  background: none; border: none; padding: 0; margin: 0;
+  font-family: inherit; text-align: left; width: 100%;
+}
+.status-section-title:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px;
 }
 .status-section-title::before {
   content: '\25b8'; display: inline-block; transition: transform var(--fast);
@@ -1237,6 +1288,10 @@ input, select, textarea { font: inherit; color: inherit; }
 }
 .status-section-title.open::before { transform: rotate(90deg); }
 .status-kv { padding-left: 16px; }
+.status-dl { margin: 0; }
+.status-list {
+  list-style: none; margin: 0; padding: 0;
+}
 .kv-row {
   display: flex; padding: 3px 0; font-size: .88rem;
   border-bottom: 1px solid var(--border);
@@ -1249,8 +1304,8 @@ input, select, textarea { font: inherit; color: inherit; }
   background: rgba(79,143,250,.03);
   border-radius: 4px;
 }
-.kv-key { color: var(--text-2); min-width: 180px; flex-shrink: 0; padding-right: 12px; }
-.kv-val { color: var(--text-0); word-break: break-word; }
+.kv-key { color: var(--text-2); min-width: 180px; flex-shrink: 0; padding-right: 12px; margin: 0; }
+.kv-val { color: var(--text-0); word-break: break-word; margin: 0; }
 
 /* ---------- Gauges (SVG containers — sports-car cluster) ----- */
 .gauge-svg { width: 100%; max-width: 180px; }
@@ -1297,7 +1352,9 @@ input, select, textarea { font: inherit; color: inherit; }
 .btn-icon { width: 34px; height: 34px; padding: 0; }
 .btn-group { display: flex; gap: 8px; flex-wrap: wrap; }
 .btn-ico { flex-shrink: 0; vertical-align: middle; }
+.custom-cmd-group:last-child { margin-bottom: 0; }
 .custom-cmd-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.custom-cmd-group .form-hint { margin-top: 4px; }
 .custom-cmd-input { font-size: .85rem; }
 
 /* ---------- Forms ------------------------------------------- */
@@ -1409,8 +1466,13 @@ input, select, textarea { font: inherit; color: inherit; }
 }
 .notif-cat-label {
   display: inline-flex; align-items: center; cursor: pointer; user-select: none;
+  position: relative;
 }
-.notif-cat-label input { display: none; }
+.notif-cat-label input:focus + .notif-cat-chip,
+.notif-cat-label input:focus-visible + .notif-cat-chip {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .notif-cat-chip {
   display: inline-block;
   padding: 4px 10px;
@@ -2012,7 +2074,7 @@ input, select, textarea { font: inherit; color: inherit; }
   background: rgba(79,143,250,.1); color: var(--accent); flex-shrink: 0;
 }
 .set-panel-icon svg { width: 20px; height: 20px; }
-.set-panel-title { font-size: 1rem; font-weight: 700; color: var(--text-0); }
+.set-panel-title { font-size: 1rem; font-weight: 700; color: var(--text-0); margin: 0; }
 .set-panel-sub { font-size: .75rem; color: var(--text-3); margin-top: 1px; }
 
 /* Save bar */
@@ -2064,7 +2126,7 @@ input, select, textarea { font: inherit; color: inherit; }
 }
 .set-sec-group-hdr > svg { flex-shrink: 0; color: var(--accent); margin-top: 2px; }
 .set-sec-group-title {
-  font-size: .88rem; font-weight: 700; color: var(--text-0);
+  font-size: .88rem; font-weight: 700; color: var(--text-0); margin: 0;
 }
 .set-sec-group-desc {
   font-size: .75rem; color: var(--text-2); margin-top: 2px; line-height: 1.4;

@@ -79,6 +79,71 @@ function statusKey(bs) {
 }
 
 /* ============================================================
+   WiFi signal strength conversion + dial configuration
+   ============================================================
+   There is NO universal standard for turning a WiFi RSSI (dBm) into a
+   "signal quality" percentage. Vendors disagree on what 0% and 100% mean,
+   so every dBm<->% mapping is an approximation. We standardise on the linear
+   mapping used by Microsoft's Native WiFi API (the wlanSignalQuality field),
+   because it is the most widely referenced and what Windows itself reports:
+
+       quality% = 2 * (dBm + 100)   (clamped to 0..100)
+       dBm      = quality% / 2 - 100
+
+   i.e.  -50 dBm (or stronger) => 100%,  -100 dBm (or weaker) => 0%,
+   and every 0.5 dBm ~= 1%. Example: -75 dBm reads 50%.
+
+   References:
+     - Microsoft Native WiFi wlanSignalQuality (WLAN_SIGNAL_QUALITY).
+     - https://stackoverflow.com/questions/15797920 (percent<->dBm).
+
+   History / rationale (see github discussion #1504):
+     Earlier genmon builds scaled -30 dBm=100% / -90 dBm=0%. That had no cited
+     source and made mid-range signals look weaker than users expected
+     (a -75 dBm showed 25%). The -50/-100 scale is the de-facto standard, so
+     we adopt it here and document it so the choice can be defended later.
+
+   Note: genmon.py reports whatever the WiFi driver supplies — dBm for the
+   built-in Raspberry Pi adapter, a percentage for many USB adapters. The tile
+   converts between the two so both readouts (and the dial needle) are shown
+   consistently regardless of what the driver reports. */
+var WifiSignal = {
+  DBM_AT_100: -50,   /* dBm at (or above) which quality is 100% */
+  DBM_AT_0: -100,    /* dBm at (or below) which quality is 0% */
+  dbmToPct: function(dbm) {
+    return Math.round(Math.max(0, Math.min(100, 2 * (dbm + 100))));
+  },
+  pctToDbm: function(pct) {
+    return Math.round(pct / 2 - 100);
+  },
+  /* Scientific dial scale (dBm) with red->green colour zones. The scale runs
+     to -30 dBm so strong real-world signals (which sit around -30..-45) still
+     move the needle even though anything >= -50 dBm is already 100%. */
+  DIAL_MIN: -90,
+  DIAL_MAX: -30,
+  DIAL_LABELS: [-90, -70, -50, -30],
+  DIAL_ZONES: [
+    { from: -90, to: -70, color: '#F44336' },  /* poor  */
+    { from: -70, to: -60, color: '#FF9800' },  /* fair  */
+    { from: -60, to: -30, color: '#4CAF50' }   /* good  */
+  ],
+  /* Signal quality zone for a given dBm. Boundaries match DIAL_ZONES so the
+     header status-bar icon and the tile dial always agree on colour. */
+  zoneForDbm: function(dbm) {
+    if (dbm >= -60) return 'good';
+    if (dbm >= -70) return 'fair';
+    return 'poor';
+  },
+  /* Fan-icon fill level (1..4) using the same dBm boundaries as the zones. */
+  barsForDbm: function(dbm) {
+    if (dbm >= -50) return 4;
+    if (dbm >= -60) return 3;
+    if (dbm >= -70) return 2;
+    return 1;
+  }
+};
+
+/* ============================================================
    STORE  (server-backed persistence via genmon.conf ui_prefs)
    ============================================================ */
 var Store = {
@@ -307,12 +372,14 @@ var Modal = {
   show: function(title, body, buttons) {
     var bh = '';
     if (buttons) buttons.forEach(function(b) {
-      bh += '<button class="btn ' + (b.cls||'btn-outline') + '" data-action="' +
+      bh += '<button type="button" class="btn ' + (b.cls||'btn-outline') + '" data-action="' +
             esc(b.action||'close') + '">' + esc(b.text) + '</button>';
     });
     this._$ov.html(
-      '<div class="modal"><div class="modal-header">' + esc(title) +
-      '<button class="modal-close" data-action="close">&times;</button></div>' +
+      '<div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">' +
+      '<div class="modal-header"><span id="modal-title">' + esc(title) + '</span>' +
+      '<button type="button" class="modal-close" data-action="close" aria-label="Close ' +
+      esc(title) + '">&times;</button></div>' +
       '<div class="modal-body">' + (body._trusted ? body._html : esc(body)) + '</div>' +
       (bh ? '<div class="modal-footer">' + bh + '</div>' : '') +
       '</div>'
@@ -507,14 +574,14 @@ var ICONS = {
 };
 function icon(name) {
   return '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
-    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">' +
     (ICONS[name]||ICONS.about) + '</svg>';
 }
 /** Small icon for placement inside buttons */
 function btnIcon(name, sz) {
   sz = sz || 14;
   return '<svg class="btn-ico" width="'+sz+'" height="'+sz+'" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
-    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">' +
     (ICONS[name]||'') + '</svg>';
 }
 /**
@@ -824,40 +891,74 @@ var UI = {
     }
   },
 
-  /** Recursively render nested JSON as collapsible KV sections */
+  /** One accessible key/value row (definition term + description). */
+  kvRow: function(key, val, valCls) {
+    return '<div class="kv-row">' +
+      '<dt class="kv-key">' + esc(key) + '</dt>' +
+      '<dd class="kv-val' + (valCls || '') + '">' +
+      esc(val != null && val !== '' ? val : '--') + '</dd></div>';
+  },
+  /** Wrap kv rows in a single definition list so AT separates labels from values. */
+  kvDl: function(rowsHtml) {
+    return rowsHtml ? '<dl class="status-dl">' + rowsHtml + '</dl>' : '';
+  },
+
+  /** Recursively render nested JSON as collapsible KV sections.
+   *  Uses headings + expandable buttons for sections, <dl> for key/value
+   *  rows, and <ul> for plain lists — so AT can navigate without run-on text. */
   renderJson: function(data, depth) {
-    if (!data || typeof data !== 'object') return '<span>' + esc(String(data)) + '</span>';
+    if (data == null || typeof data !== 'object') return '<span>' + esc(String(data)) + '</span>';
     depth = depth || 0;
+    /* Detailed Status is h2; nested sections start at h3 */
+    var hl = Math.min(3 + depth, 6);
     var h = '';
     if (Array.isArray(data)) {
-      for (var i = 0; i < data.length; i++) {
+      var hasObj = false;
+      for (var ai = 0; ai < data.length; ai++) {
+        if (data[ai] && typeof data[ai] === 'object') { hasObj = true; break; }
+      }
+      if (!hasObj) {
+        h += '<ul class="status-list" role="list">';
+        for (var i = 0; i < data.length; i++) {
+          h += '<li class="kv-row" role="listitem"><span class="kv-val">' +
+            esc(data[i] != null ? data[i] : '') + '</span></li>';
+        }
+        return h + '</ul>';
+      }
+      for (i = 0; i < data.length; i++) {
         var item = data[i];
         if (item && typeof item === 'object') {
           h += UI.renderJson(item, depth);
         } else {
-          h += '<div class="kv-row"><span class="kv-val">' + esc(item!=null?item:'') + '</span></div>';
+          h += '<div class="kv-row"><span class="kv-val">' + esc(item != null ? item : '') + '</span></div>';
         }
       }
       return h;
     }
+    var pending = '';
+    function flushScalars() {
+      if (!pending) return;
+      h += '<dl class="status-dl">' + pending + '</dl>';
+      pending = '';
+    }
     for (var key in data) {
       if (!data.hasOwnProperty(key)) continue;
       var v = data[key];
-      if (v && typeof v === 'object' && !Array.isArray(v)) {
+      if (v && typeof v === 'object') {
+        flushScalars();
         h += '<div class="status-section">' +
-          '<div class="status-section-title open">' + esc(key) + '</div>' +
+          '<h' + hl + ' class="status-section-hdr">' +
+          '<button type="button" class="status-section-title open" aria-expanded="true">' +
+          esc(key) + '</button></h' + hl + '>' +
           '<div class="status-kv">' +
-          UI.renderJson(v, depth+1) + '</div></div>';
-      } else if (Array.isArray(v)) {
-        h += '<div class="status-section">' +
-          '<div class="status-section-title open">' + esc(key) + '</div>' +
-          '<div class="status-kv">' +
-          UI.renderJson(v, depth+1) + '</div></div>';
+          UI.renderJson(v, depth + 1) + '</div></div>';
       } else {
-        h += '<div class="kv-row"><span class="kv-key">' + esc(key) +
-          '</span><span class="kv-val">' + esc(v!=null?v:'') + '</span></div>';
+        pending += '<div class="kv-row">' +
+          '<dt class="kv-key">' + esc(key) + '</dt>' +
+          '<dd class="kv-val">' + esc(v != null ? v : '') + '</dd></div>';
       }
     }
+    flushScalars();
     return h;
   },
 
@@ -1002,7 +1103,10 @@ var UI = {
   /** Bind section-title click toggle globally inside $container */
   bindSectionToggles: function($c) {
     $c.off('click.sect', '.status-section-title').on('click.sect', '.status-section-title', function() {
-      $(this).toggleClass('open').next('.status-kv').slideToggle(200);
+      var $btn = $(this);
+      var open = !$btn.hasClass('open');
+      $btn.toggleClass('open', open).attr('aria-expanded', open ? 'true' : 'false');
+      $btn.closest('.status-section').children('.status-kv').slideToggle(200);
     });
   },
 
@@ -1021,8 +1125,9 @@ var UI = {
     $c.find('.status-section-title').each(function() {
       var key = $(this).text().trim();
       if (key in map) {
-        $(this).toggleClass('open', map[key]);
-        $(this).next('.status-kv').toggle(map[key]);
+        var isOpen = !!map[key];
+        $(this).toggleClass('open', isOpen).attr('aria-expanded', isOpen ? 'true' : 'false');
+        $(this).closest('.status-section').children('.status-kv').toggle(isOpen);
       }
     });
   },
@@ -1042,9 +1147,10 @@ var UI = {
     /* WiFi signal strength (dBm, positive number means -N dBm) */
     if (ind.wifi) {
       var dbm = ind.wifi;  /* e.g. 42 means -42 dBm */
-      var wPct = Math.round(Math.max(0, Math.min(100, (-dbm + 90) / 60 * 100)));
-      var bars = dbm <= 30 ? 4 : dbm <= 50 ? 3 : dbm <= 65 ? 2 : 1;
-      var wc = bars >= 3 ? 'ind-ok' : bars === 2 ? 'ind-warn' : 'ind-bad';
+      var wPct = WifiSignal.dbmToPct(-dbm);
+      var bars = WifiSignal.barsForDbm(-dbm);
+      var zone = WifiSignal.zoneForDbm(-dbm);
+      var wc = zone === 'good' ? 'ind-ok' : zone === 'fair' ? 'ind-warn' : 'ind-bad';
       parts.push(
         '<div class="hdr-ind '+wc+'" title="WiFi: -'+dbm+' dBm ('+wPct+'%)">' +
         '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' +
@@ -1075,7 +1181,7 @@ var UI = {
       }
       var tc = t < warnAt ? 'ind-ok' : t < badAt ? 'ind-warn' : 'ind-bad';
       parts.push(
-        '<div class="hdr-ind '+tc+'" title="CPU: '+t+'\u00B0C">' +
+        '<div class="hdr-ind '+tc+'" title="CPU: '+t+'\u00B0">' +
         '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' +
         '<path d="M14 14.76V3.5a2.5 2.5 0 00-5 0v11.26a4.5 4.5 0 105 0z"/>' +
         '<circle cx="11.5" cy="17.5" r="2" fill="currentColor" stroke="none" opacity=".5"/>' +
@@ -1305,7 +1411,7 @@ var Pages = {
         continue;
       }
       if (fixed === 'wifibar') {
-        self._updateWifi(key, tiles[i]);
+        self._updateWifi(key, i, tiles[i]);
         continue;
       }
 
@@ -1411,13 +1517,13 @@ var Pages = {
       var detailView = !!Store.get('detailView');
       var alwaysDetail = !!Store.get('alwaysDetail');
       var h = '<div class="dash-header">' +
-        '<div class="page-title">' + icon('status') + ' Dashboard</div>' +
+        '<h1 class="page-title">' + icon('status') + ' Dashboard</h1>' +
         '</div>';
 
       var self = Pages.status;
 
       /* --- Tile grid --- */
-      h += '<div id="tile-grid" class="tile-grid">';
+      h += '<div id="tile-grid" class="tile-grid" role="list" aria-label="Dashboard tiles">';
       for (var oi = 0; oi < order.length; oi++) {
         var key = order[oi];
         if (Store.isTileHidden(key)) continue;
@@ -1469,11 +1575,12 @@ var Pages = {
 
       /* --- Status text (collapsible, auto-expanded in detail view) --- */
       h += '<div class="card status-panel-card mt-2">' +
-        '<div class="card-header status-panel-toggle" id="status-panel-hdr" style="cursor:pointer;user-select:none">' +
+        '<h2 class="card-header status-panel-toggle" id="status-panel-hdr" style="cursor:pointer;user-select:none"' +
+        ' role="button" tabindex="0" aria-expanded="' + (detailView || alwaysDetail ? 'true' : 'false') + '" aria-controls="status-panel">' +
         icon('logs') + ' <span>Detailed Status</span>' +
-        '<svg class="status-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-left:auto;transition:transform .2s"><polyline points="6 9 12 15 18 9"/></svg>' +
-        '</div>' +
-        '<div id="status-panel" class="status-panel" style="display:' + (detailView || alwaysDetail ? 'block' : 'none') + '">' +
+        '<svg class="status-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" style="margin-left:auto;transition:transform .2s"><polyline points="6 9 12 15 18 9"/></svg>' +
+        '</h2>' +
+        '<div id="status-panel" class="status-panel" role="region" aria-labelledby="status-panel-hdr" style="display:' + (detailView || alwaysDetail ? 'block' : 'none') + '">' +
         '<div class="text-muted text-center">Loading status\u2026</div></div></div>';
 
       $c.html(h);
@@ -1534,7 +1641,8 @@ var Pages = {
         if (on) {
           $('#tile-grid').slideUp(250);
           $('#status-panel').slideDown(250);
-          $('#status-panel-hdr').find('.status-chevron').css('transform', 'rotate(180deg)');
+          $('#status-panel-hdr').attr('aria-expanded', 'true')
+            .find('.status-chevron').css('transform', 'rotate(180deg)');
           /* Auto-enable Always Show Detailed Status */
           if (!$('#always-detail-cb').is(':checked')) {
             $('#always-detail-cb').prop('checked', true).trigger('change');
@@ -1543,7 +1651,8 @@ var Pages = {
           $('#tile-grid').slideDown(250);
           if (!$('#always-detail-cb').is(':checked')) {
             $('#status-panel').slideUp(200);
-            $('#status-panel-hdr').find('.status-chevron').css('transform', '');
+            $('#status-panel-hdr').attr('aria-expanded', 'false')
+              .find('.status-chevron').css('transform', '');
           }
         }
       });
@@ -1554,10 +1663,12 @@ var Pages = {
         Store.set('alwaysDetail', on);
         if (on) {
           $('#status-panel').slideDown(250);
-          $('#status-panel-hdr').find('.status-chevron').css('transform', 'rotate(180deg)');
+          $('#status-panel-hdr').attr('aria-expanded', 'true')
+            .find('.status-chevron').css('transform', 'rotate(180deg)');
         } else if (!$('#detail-view-cb').is(':checked')) {
           $('#status-panel').slideUp(200);
-          $('#status-panel-hdr').find('.status-chevron').css('transform', '');
+          $('#status-panel-hdr').attr('aria-expanded', 'false')
+            .find('.status-chevron').css('transform', '');
         }
       });
 
@@ -1566,7 +1677,13 @@ var Pages = {
         var $body = $('#status-panel');
         var open = $body.is(':visible');
         $body.slideToggle(200);
+        $(this).attr('aria-expanded', open ? 'false' : 'true');
         $(this).find('.status-chevron').css('transform', open ? '' : 'rotate(180deg)');
+      }).on('keydown', function(e) {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          $(this).trigger('click');
+        }
       });
 
       /* Clock mode toggle */
@@ -1587,6 +1704,11 @@ var Pages = {
         $g.toggleClass('editing', S.editMode);
         $g.find('.tile').attr('draggable', S.editMode ? 'true' : 'false');
         $g.find('.tile-edit-controls').toggle(S.editMode);
+        /* Edit chrome is aria-hidden while browsing; expose it only in edit mode */
+        $g.find('.tile-hide-btn, .tile-drag-handle, .tile-edit-controls')
+          .attr('aria-hidden', S.editMode ? 'false' : 'true');
+        $g.find('.tile-hide-btn, .tile-edit-controls button')
+          .attr('tabindex', S.editMode ? '0' : '-1');
         if (S.editMode) {
           self._buildDrawer();
           $('#tile-drawer').slideDown(200);
@@ -1711,6 +1833,12 @@ var Pages = {
         $btn.addClass('active');
         Store.setGaugeType(key, gtype);
         $tile.attr('data-gtype', gtype);
+        /* WiFi tile: Bars <-> Dial is a pure CSS view swap (the dial gauge is
+           already built into #gw-idx by _initGauge), so just refresh values. */
+        if (gtype === 'wifibar' || gtype === 'wifidial') {
+          if (S._lastGaugeTiles) self._updateGauges(S._lastGaugeTiles);
+          return;
+        }
         /* Enforce size constraints per gauge type */
         if (gtype === 'radial') {
           $tile.removeClass('tile-sm tile-lg').addClass('tile-md').data('size', 'md');
@@ -1721,7 +1849,11 @@ var Pages = {
           self._initGauge(key, gi4, tiles[gi4]);
           /* Rebuild edit controls to reflect new gauge-type constraints */
           $tile.find('.tile-edit-controls').replaceWith(self._editControlsHtml(false, key));
-          if (S.editMode) $tile.find('.tile-edit-controls').show();
+          if (S.editMode) {
+            $tile.find('.tile-edit-controls').show()
+              .attr('aria-hidden', 'false')
+              .find('button').attr('tabindex', '0');
+          }
           /* Refresh the value immediately */
           API.get('gui_status_json').done(function(d) {
             if (d && d.tiles) Pages._updateGauges(d.tiles);
@@ -1948,56 +2080,56 @@ var Pages = {
     /* --- Special tile HTML builders --- */
     _chartTileHtml: function() {
       var chartSize = Store.getChartSize() || 'xl';
-      return '<div class="tile tile-chart tile-' + esc(chartSize) + '" data-tile="chart" data-size="' + esc(chartSize) + '" draggable="false">' +
-        '<button class="tile-hide-btn" title="Hide tile">&times;</button>' +
-        '<div class="tile-drag-handle" title="Drag to reorder">' + icon('monitor') + '</div>' +
-        '<div class="tile-edit-controls" style="display:none"><div class="tile-ctrl-row">' +
+      return '<div class="tile tile-chart tile-' + esc(chartSize) + '" role="listitem" data-tile="chart" data-size="' + esc(chartSize) + '" draggable="false">' +
+        '<button type="button" class="tile-hide-btn" title="Hide tile" tabindex="-1" aria-hidden="true">&times;</button>' +
+        '<div class="tile-drag-handle" title="Drag to reorder" aria-hidden="true">' + icon('monitor') + '</div>' +
+        '<div class="tile-edit-controls" style="display:none" aria-hidden="true"><div class="tile-ctrl-row">' +
         '<span class="tile-ctrl-label">Width</span>' +
-        '<button class="chart-size-btn' + (chartSize==='md'?' active':'') + '" data-csz="md" title="1 column">1</button>' +
-        '<button class="chart-size-btn' + (chartSize==='lg'?' active':'') + '" data-csz="lg" title="2 columns">2</button>' +
-        '<button class="chart-size-btn' + (chartSize==='xl'?' active':'') + '" data-csz="xl" title="3 columns">3</button>' +
+        '<button type="button" class="chart-size-btn' + (chartSize==='md'?' active':'') + '" data-csz="md" title="1 column" tabindex="-1">1</button>' +
+        '<button type="button" class="chart-size-btn' + (chartSize==='lg'?' active':'') + '" data-csz="lg" title="2 columns" tabindex="-1">2</button>' +
+        '<button type="button" class="chart-size-btn' + (chartSize==='xl'?' active':'') + '" data-csz="xl" title="3 columns" tabindex="-1">3</button>' +
         '</div></div>' +
-        '<div class="tile-title">' + esc(S.chartTitle || 'Power Output') + '</div>' +
-        '<div class="chart-wrap"><canvas id="pwr-chart"></canvas></div>' +
-        '<div class="chart-controls">' +
-        '<button class="chart-btn" data-mins="60">1h</button>' +
-        '<button class="chart-btn" data-mins="360">6h</button>' +
-        '<button class="chart-btn" data-mins="1440">24h</button>' +
-        '<button class="chart-btn" data-mins="10080">7d</button>' +
-        '<button class="chart-btn active" data-mins="43200">30d</button>' +
+        '<h2 class="tile-title">' + esc(S.chartTitle || 'Power Output') + '</h2>' +
+        '<div class="chart-wrap" aria-hidden="true"><canvas id="pwr-chart"></canvas></div>' +
+        '<div class="chart-controls" aria-label="Chart time range">' +
+        '<button type="button" class="chart-btn" data-mins="60">1h</button>' +
+        '<button type="button" class="chart-btn" data-mins="360">6h</button>' +
+        '<button type="button" class="chart-btn" data-mins="1440">24h</button>' +
+        '<button type="button" class="chart-btn" data-mins="10080">7d</button>' +
+        '<button type="button" class="chart-btn active" data-mins="43200">30d</button>' +
         '</div></div>';
     },
 
     _clockTileHtml: function() {
       var savedSize = Store.getTileSize('clock') || 'sm';
       var clockMode = Store.get('clockMode', 'digital');
-      return '<div class="tile tile-clock tile-' + esc(savedSize) + '" data-tile="clock" data-size="' + esc(savedSize) + '" draggable="false">' +
-        '<button class="tile-hide-btn" title="Hide tile">&times;</button>' +
-        '<div class="tile-drag-handle" title="Drag to reorder">' + icon('clock') + '</div>' +
-        '<div class="tile-edit-controls" style="display:none"><div class="tile-ctrl-row">' +
+      return '<div class="tile tile-clock tile-' + esc(savedSize) + '" role="listitem" data-tile="clock" data-size="' + esc(savedSize) + '" draggable="false">' +
+        '<button type="button" class="tile-hide-btn" title="Hide tile" tabindex="-1" aria-hidden="true">&times;</button>' +
+        '<div class="tile-drag-handle" title="Drag to reorder" aria-hidden="true">' + icon('clock') + '</div>' +
+        '<div class="tile-edit-controls" style="display:none" aria-hidden="true"><div class="tile-ctrl-row">' +
         '<span class="tile-ctrl-label">Size</span>' +
-        '<button class="tile-size-btn" data-dir="down" title="Smaller">&minus;</button>' +
-        '<button class="tile-size-btn" data-dir="up" title="Larger">+</button>' +
+        '<button type="button" class="tile-size-btn" data-dir="down" title="Smaller" tabindex="-1">&minus;</button>' +
+        '<button type="button" class="tile-size-btn" data-dir="up" title="Larger" tabindex="-1">+</button>' +
         '</div><div class="tile-ctrl-row">' +
         '<span class="tile-ctrl-label">Style</span>' +
-        '<button class="clock-mode-btn' + (clockMode==='digital'?' active':'') + '" data-cmode="digital" title="Digital">D</button>' +
-        '<button class="clock-mode-btn' + (clockMode==='analog'?' active':'') + '" data-cmode="analog" title="Analog">A</button>' +
+        '<button type="button" class="clock-mode-btn' + (clockMode==='digital'?' active':'') + '" data-cmode="digital" title="Digital" tabindex="-1">D</button>' +
+        '<button type="button" class="clock-mode-btn' + (clockMode==='analog'?' active':'') + '" data-cmode="analog" title="Analog" tabindex="-1">A</button>' +
         '</div></div>' +
-        '<div class="tile-title">Clock</div>' +
+        '<h2 class="tile-title">Clock</h2>' +
         '<div id="clock-face"></div></div>';
     },
 
     _weatherTileHtml: function() {
       var savedSize = Store.getTileSize('weather') || 'md';
-      return '<div class="tile tile-weather tile-' + esc(savedSize) + '" data-tile="weather" data-size="' + esc(savedSize) + '" draggable="false">' +
-        '<button class="tile-hide-btn" title="Hide tile">&times;</button>' +
-        '<div class="tile-drag-handle" title="Drag to reorder">' + icon('cloud') + '</div>' +
-        '<div class="tile-edit-controls" style="display:none"><div class="tile-ctrl-row">' +
+      return '<div class="tile tile-weather tile-' + esc(savedSize) + '" role="listitem" data-tile="weather" data-size="' + esc(savedSize) + '" draggable="false">' +
+        '<button type="button" class="tile-hide-btn" title="Hide tile" tabindex="-1" aria-hidden="true">&times;</button>' +
+        '<div class="tile-drag-handle" title="Drag to reorder" aria-hidden="true">' + icon('cloud') + '</div>' +
+        '<div class="tile-edit-controls" style="display:none" aria-hidden="true"><div class="tile-ctrl-row">' +
         '<span class="tile-ctrl-label">Size</span>' +
-        '<button class="tile-size-btn" data-dir="down" title="Smaller">&minus;</button>' +
-        '<button class="tile-size-btn" data-dir="up" title="Larger">+</button>' +
+        '<button type="button" class="tile-size-btn" data-dir="down" title="Smaller" tabindex="-1">&minus;</button>' +
+        '<button type="button" class="tile-size-btn" data-dir="up" title="Larger" tabindex="-1">+</button>' +
         '</div></div>' +
-        '<div class="tile-title">Weather</div>' +
+        '<h2 class="tile-title">Weather</h2>' +
         '<div id="weather-tile-body" class="weather-body">' +
         '<div class="text-muted" style="font-size:.8rem;text-align:center;padding:16px 0">No weather data</div>' +
         '</div></div>';
@@ -2011,24 +2143,25 @@ var Pages = {
       var font = Store.get('ovFont') || 'md';
       var rev  = !!Store.get('ovReversed');
       return '<div class="tile tile-overview ov-span-' + span + ' ov-font-' + esc(font) + (rev ? ' ov-reversed' : '') + '" ' +
-        'data-tile="overview" data-ov-span="' + span + '" draggable="false">' +
-        '<button class="tile-hide-btn" title="Hide tile">&times;</button>' +
-        '<div class="tile-drag-handle" title="Drag to reorder">' + icon('status') + '</div>' +
-        '<div class="tile-edit-controls" style="display:none">' +
+        'role="listitem" data-tile="overview" data-ov-span="' + span + '" draggable="false">' +
+        '<button type="button" class="tile-hide-btn" title="Hide tile" tabindex="-1" aria-hidden="true">&times;</button>' +
+        '<div class="tile-drag-handle" title="Drag to reorder" aria-hidden="true">' + icon('status') + '</div>' +
+        '<div class="tile-edit-controls" style="display:none" aria-hidden="true">' +
         '<div class="tile-ctrl-row">' +
         '<span class="tile-ctrl-label">Size</span>' +
-        '<button class="tile-size-btn ov-span-btn" data-dir="down" title="Narrower">&minus;</button>' +
-        '<button class="tile-size-btn ov-span-btn" data-dir="up" title="Wider">+</button>' +
+        '<button type="button" class="tile-size-btn ov-span-btn" data-dir="down" title="Narrower" tabindex="-1">&minus;</button>' +
+        '<button type="button" class="tile-size-btn ov-span-btn" data-dir="up" title="Wider" tabindex="-1">+</button>' +
         '</div>' +
         '<div class="tile-ctrl-row">' +
         '<span class="tile-ctrl-label">Font</span>' +
-        '<button class="tile-font-btn ov-font-btn" data-dir="down" title="Smaller font">A&minus;</button>' +
-        '<button class="tile-font-btn ov-font-btn" data-dir="up" title="Larger font">A+</button>' +
+        '<button type="button" class="tile-font-btn ov-font-btn" data-dir="down" title="Smaller font" tabindex="-1">A&minus;</button>' +
+        '<button type="button" class="tile-font-btn ov-font-btn" data-dir="up" title="Larger font" tabindex="-1">A+</button>' +
         '</div>' +
         '<div class="tile-ctrl-row">' +
-        '<button class="tile-font-btn ov-reverse-btn" title="Toggle coloured background">' + (rev ? '\u25cb' : '\u25cf') + '</button>' +
+        '<button type="button" class="tile-font-btn ov-reverse-btn" title="Toggle coloured background" tabindex="-1">' + (rev ? '\u25cb' : '\u25cf') + '</button>' +
         '</div>' +
         '</div>' +
+        '<h2 class="sr-only">Overview</h2>' +
         '<div class="overview-headline" id="overview-headline" data-level="ready">--</div>' +
         '<div class="overview-sub" id="overview-sub"></div></div>';
     },
@@ -2068,29 +2201,29 @@ var Pages = {
       /* Logs tile has special body */
       if (info.isLogs) {
         return '<div class="tile tile-info tile-logs tile-' + esc(savedSize) + ' tile-font-' + esc(savedFont) + '" ' +
-          'data-tile="' + idx + '" data-size="' + esc(savedSize) + '" data-fontsize="' + esc(savedFont) + '" draggable="false">' +
-          '<button class="tile-hide-btn" title="Hide tile">&times;</button>' +
-          '<div class="tile-drag-handle" title="Drag to reorder">' + icon(info.icon) + '</div>' +
+          'role="listitem" data-tile="' + idx + '" data-size="' + esc(savedSize) + '" data-fontsize="' + esc(savedFont) + '" draggable="false">' +
+          '<button type="button" class="tile-hide-btn" title="Hide tile" tabindex="-1" aria-hidden="true">&times;</button>' +
+          '<div class="tile-drag-handle" title="Drag to reorder" aria-hidden="true">' + icon(info.icon) + '</div>' +
           Pages.status._editControlsHtml(true) +
-          '<div class="tile-title">' + esc(info.title) + '</div>' +
+          '<h2 class="tile-title">' + esc(info.title) + '</h2>' +
           '<div class="tile-logs-body" id="info-logs-body">'+
           '<div class="text-muted" style="font-size:.75rem;text-align:center;padding:8px 0">No log data</div></div></div>';
       }
       var subsHtml = '';
       if (info.subs && info.subs.length) {
-        subsHtml = '<div class="tile-subs" id="info-subs-' + esc(info.id) + '">';
+        subsHtml = '<ul class="tile-subs" id="info-subs-' + esc(info.id) + '">';
         for (var s = 0; s < info.subs.length; s++) {
-          subsHtml += '<div class="tile-sub"><span class="tile-sub-label">' + esc(info.subs[s].label) + '</span>' +
-            '<span class="tile-sub-val" data-field="' + esc(info.subs[s].field) + '">--</span></div>';
+          subsHtml += '<li class="tile-sub"><span class="tile-sub-label">' + esc(info.subs[s].label) + ':</span>' +
+            '<span class="tile-sub-val" data-field="' + esc(info.subs[s].field) + '">--</span></li>';
         }
-        subsHtml += '</div>';
+        subsHtml += '</ul>';
       }
       return '<div class="tile tile-info tile-' + esc(savedSize) + ' tile-font-' + esc(savedFont) + '" ' +
-        'data-tile="' + idx + '" data-size="' + esc(savedSize) + '" data-fontsize="' + esc(savedFont) + '" draggable="false">' +
-        '<button class="tile-hide-btn" title="Hide tile">&times;</button>' +
-        '<div class="tile-drag-handle" title="Drag to reorder">' + icon(info.icon) + '</div>' +
+        'role="listitem" data-tile="' + idx + '" data-size="' + esc(savedSize) + '" data-fontsize="' + esc(savedFont) + '" draggable="false">' +
+        '<button type="button" class="tile-hide-btn" title="Hide tile" tabindex="-1" aria-hidden="true">&times;</button>' +
+        '<div class="tile-drag-handle" title="Drag to reorder" aria-hidden="true">' + icon(info.icon) + '</div>' +
         Pages.status._editControlsHtml(true) +
-        '<div class="tile-title">' + esc(info.title) + '</div>' +
+        '<h2 class="tile-title">' + esc(info.title) + '</h2>' +
         '<div class="tile-info-value" id="info-val-' + esc(info.id) + '">--</div>' +
         subsHtml + '</div>';
     },
@@ -2110,12 +2243,12 @@ var Pages = {
       else if (gtype === 'arc' && savedSize === 'lg') savedSize = 'lg';
       var savedFont = Store.getTileFontSize(idx) || 'md';
       return '<div class="tile tile-' + esc(savedSize) + ' tile-font-' + esc(savedFont) + '" ' +
-        'data-tile="' + idx + '" data-size="' + esc(savedSize) + '" data-fontsize="' + esc(savedFont) + '" data-gtype="' + esc(gtype) + '" draggable="false">' +
-        '<button class="tile-hide-btn" title="Hide tile">&times;</button>' +
-        '<div class="tile-drag-handle" title="Drag to reorder">' + icon('status') + '</div>' +
+        'role="listitem" data-tile="' + idx + '" data-size="' + esc(savedSize) + '" data-fontsize="' + esc(savedFont) + '" data-gtype="' + esc(gtype) + '" draggable="false">' +
+        '<button type="button" class="tile-hide-btn" title="Hide tile" tabindex="-1" aria-hidden="true">&times;</button>' +
+        '<div class="tile-drag-handle" title="Drag to reorder" aria-hidden="true">' + icon('status') + '</div>' +
         Pages.status._editControlsHtml(false, idx) +
-        '<div class="tile-title">' + esc(t.title) + '</div>' +
-        '<div class="tile-gauge" id="gw-' + idx + '"></div>' +
+        '<h2 class="tile-title">' + esc(t.title) + '</h2>' +
+        '<div class="tile-gauge" id="gw-' + idx + '" aria-hidden="true"></div>' +
         '<div class="tile-value" id="tile-val-' + idx + '">--</div></div>';
     },
 
@@ -2124,14 +2257,14 @@ var Pages = {
       var max = t.maximum || 100, min = t.minimum || 0;
       /* Vertical thermometer: tube (x=19..41, rounded top) + bulb (cx=30, cy=118, r=18) */
       var bp = 'M19,16 A11,11 0 0,1 41,16 L41,103.7 A18,18 0 1,1 19,103.7 Z';
-      return '<div class="tile tile-md tile-thermo" data-tile="' + idx + '" data-size="md" data-gtype="thermo" ' +
+      return '<div class="tile tile-md tile-thermo" role="listitem" data-tile="' + idx + '" data-size="md" data-gtype="thermo" ' +
         'data-min="' + min + '" data-max="' + max + '" draggable="false">' +
-        '<button class="tile-hide-btn" title="Hide tile">&times;</button>' +
-        '<div class="tile-drag-handle" title="Drag to reorder">' + icon('status') + '</div>' +
-        '<div class="tile-edit-controls" style="display:none"></div>' +
-        '<div class="tile-title">' + esc(t.title) + '</div>' +
-        '<div class="thermo-wrap" id="gw-' + idx + '">' +
-          '<svg class="thermo-svg" viewBox="0 0 70 140">' +
+        '<button type="button" class="tile-hide-btn" title="Hide tile" tabindex="-1" aria-hidden="true">&times;</button>' +
+        '<div class="tile-drag-handle" title="Drag to reorder" aria-hidden="true">' + icon('status') + '</div>' +
+        '<div class="tile-edit-controls" style="display:none" aria-hidden="true"></div>' +
+        '<h2 class="tile-title">' + esc(t.title) + '</h2>' +
+        '<div class="thermo-wrap" id="gw-' + idx + '" aria-hidden="true">' +
+          '<svg class="thermo-svg" viewBox="0 0 70 140" focusable="false">' +
             '<defs>' +
               '<clipPath id="tclip-'+idx+'">' +
                 '<path d="'+bp+'"/>' +
@@ -2159,23 +2292,41 @@ var Pages = {
         '<div class="thermo-unit" id="thermo-unit-' + idx + '">&deg;C</div></div>';
     },
 
-    /* --- WiFi signal tile — classic WiFi fan icon --- */
+    /* --- WiFi signal tile — bars view (default) or scientific dBm dial --- */
+    /* Returns the stored view preference for the WiFi tile: 'wifidial' or 'wifibar' (default). */
+    _wifiGtype: function(idx) {
+      return Store.getGaugeType(idx) === 'wifidial' ? 'wifidial' : 'wifibar';
+    },
+    /* Bars vs Dial picker shown in the WiFi tile's edit controls */
+    _wifiPickerHtml: function(idx) {
+      var cur = Pages.status._wifiGtype(idx);
+      return '<div class="tile-edit-controls" style="display:none" aria-hidden="true">' +
+        '<div class="tile-ctrl-row gauge-type-picker">' +
+        '<span class="tile-ctrl-label">Style</span>' +
+        '<button type="button" class="gauge-pick-btn wide' + (cur === 'wifibar' ? ' active' : '') + '" data-gtype="wifibar" title="Signal bars" tabindex="-1">Bars</button>' +
+        '<button type="button" class="gauge-pick-btn wide' + (cur === 'wifidial' ? ' active' : '') + '" data-gtype="wifidial" title="Scientific dBm dial" tabindex="-1">Dial</button>' +
+        '</div></div>';
+    },
     _wifiTileHtml: function(idx, t, sub) {
       var isPct = sub === 'wifipercent';
-      return '<div class="tile tile-md tile-wifi" data-tile="' + idx + '" data-size="md" data-gtype="wifibar" ' +
+      var gtype = Pages.status._wifiGtype(idx);
+      return '<div class="tile tile-md tile-wifi" role="listitem" data-tile="' + idx + '" data-size="md" data-gtype="' + gtype + '" ' +
         'data-wifi-pct="' + (isPct ? '1' : '0') + '" draggable="false">' +
-        '<button class="tile-hide-btn" title="Hide tile">&times;</button>' +
-        '<div class="tile-drag-handle" title="Drag to reorder">' + icon('status') + '</div>' +
-        '<div class="tile-edit-controls" style="display:none"></div>' +
-        '<div class="tile-title">' + esc(t.title) + '</div>' +
-        '<div class="wifi-wrap" id="gw-' + idx + '">' +
-          '<svg class="wifi-svg" viewBox="0 0 24 24">' +
+        '<button type="button" class="tile-hide-btn" title="Hide tile" tabindex="-1" aria-hidden="true">&times;</button>' +
+        '<div class="tile-drag-handle" title="Drag to reorder" aria-hidden="true">' + icon('status') + '</div>' +
+        Pages.status._wifiPickerHtml(idx) +
+        '<h2 class="tile-title">' + esc(t.title) + '</h2>' +
+        /* Bars view */
+        '<div class="wifi-wrap wifi-view-bars" aria-hidden="true">' +
+          '<svg class="wifi-svg" viewBox="0 0 24 24" focusable="false" aria-hidden="true">' +
             '<path id="wifi-a3-'+idx+'" class="wifi-arc wifi-arc-dim" d="M1.42 9a16.02 16.02 0 0121.16 0" fill="none" stroke-width="2.2" stroke-linecap="round"/>' +
             '<path id="wifi-a2-'+idx+'" class="wifi-arc wifi-arc-dim" d="M5 12.55a11 11 0 0114 0" fill="none" stroke-width="2.2" stroke-linecap="round"/>' +
             '<path id="wifi-a1-'+idx+'" class="wifi-arc wifi-arc-dim" d="M8.53 16.11a6 6 0 016.95 0" fill="none" stroke-width="2.2" stroke-linecap="round"/>' +
             '<circle id="wifi-dot-'+idx+'" class="wifi-dot wifi-arc-dim" cx="12" cy="20" r="1.4"/>' +
           '</svg>' +
         '</div>' +
+        /* Dial view (radial gauge injected into #gw-idx by _initGauge) */
+        '<div class="tile-gauge wifi-view-dial" id="gw-' + idx + '" aria-hidden="true"></div>' +
         '<div class="wifi-pct" id="wifi-pct-' + idx + '">--%</div>' +
         '<div class="wifi-dbm" id="wifi-dbm-' + idx + '">-- dBm</div></div>';
     },
@@ -2195,22 +2346,22 @@ var Pages = {
               : (Store.getGaugeType(tileKey) || self._defaultGaugeType(tc ? tc.title : '', sub));
       }
       /* Fixed gauges (thermo, wifibar): no controls at all */
-      if (isFixed) return '<div class="tile-edit-controls" style="display:none"></div>';
+      if (isFixed) return '<div class="tile-edit-controls" style="display:none" aria-hidden="true"></div>';
       /* Radial & fuel: no size control. Arc: size up to lg only. */
       var showSize = (gtype !== 'radial' && gtype !== 'fuel');
-      var h = '<div class="tile-edit-controls" style="display:none">';
+      var h = '<div class="tile-edit-controls" style="display:none" aria-hidden="true">';
       if (showSize) {
         h += '<div class="tile-ctrl-row">' +
           '<span class="tile-ctrl-label">Size</span>' +
-          '<button class="tile-size-btn" data-dir="down" title="Smaller">&minus;</button>' +
-          '<button class="tile-size-btn" data-dir="up" title="Larger">+</button>' +
+          '<button type="button" class="tile-size-btn" data-dir="down" title="Smaller" tabindex="-1">&minus;</button>' +
+          '<button type="button" class="tile-size-btn" data-dir="up" title="Larger" tabindex="-1">+</button>' +
           '</div>';
       }
       if (showFontCtrl) {
         h += '<div class="tile-ctrl-row">' +
           '<span class="tile-ctrl-label">Font</span>' +
-          '<button class="tile-font-btn" data-dir="down" title="Smaller font">A&minus;</button>' +
-          '<button class="tile-font-btn" data-dir="up" title="Larger font">A+</button>' +
+          '<button type="button" class="tile-font-btn" data-dir="down" title="Smaller font" tabindex="-1">A&minus;</button>' +
+          '<button type="button" class="tile-font-btn" data-dir="up" title="Larger font" tabindex="-1">A+</button>' +
           '</div>';
       }
       /* Gauge style picker — hide for fuel tiles (only radial/fuel work) */
@@ -2220,7 +2371,7 @@ var Pages = {
           '<span class="tile-ctrl-label">Style</span>';
         for (var g = 0; g < self.GAUGE_TYPES.length; g++) {
           var gt = self.GAUGE_TYPES[g];
-          h += '<button class="gauge-pick-btn' + (gt === cur ? ' active' : '') + '" data-gtype="' + gt + '" title="' + gt + '">' + self.GAUGE_TYPE_LABELS[gt] + '</button>';
+          h += '<button type="button" class="gauge-pick-btn' + (gt === cur ? ' active' : '') + '" data-gtype="' + gt + '" title="' + gt + '" tabindex="-1">' + self.GAUGE_TYPE_LABELS[gt] + '</button>';
         }
         h += '</div>';
       }
@@ -2233,6 +2384,17 @@ var Pages = {
       if (!$w.length || !gt) return;
       var self = Pages.status;
       var sub = (gt.subtype||gt.type||'').toLowerCase();
+      /* WiFi tile: always build the dBm dial into #gw-idx (hidden by CSS in
+         bars mode) so switching Bars<->Dial is an instant view swap. */
+      if (self._FIXED_GAUGES[sub] === 'wifibar') {
+        $w.empty();
+        S.gauges[gaugeIdx] = new GenmonGauge($w[0], {
+          min: WifiSignal.DIAL_MIN, max: WifiSignal.DIAL_MAX,
+          labels: WifiSignal.DIAL_LABELS, zones: WifiSignal.DIAL_ZONES,
+          divisions: 6, subdivisions: 2, title: '', units: 'dBm'
+        });
+        return;
+      }
       /* Fixed gauges are rendered by _tileHtml — skip standard init */
       if (self._FIXED_GAUGES[sub]) return;
       var fuel = /fuel/i.test(gt.type||'') || /fuel/i.test(gt.title||'');
@@ -2327,8 +2489,9 @@ var Pages = {
                 for (var k in obj) {
                   if (!obj.hasOwnProperty(k)) continue;
                   var val = Array.isArray(obj[k]) ? (obj[k][0] || '') : obj[k];
-                  html += '<div class="log-entry"><span class="log-label">' + esc(k) + '</span>' +
-                    '<span class="log-text" title="' + esc(val) + '">' + esc(val) + '</span></div>';
+                  html += '<div class="log-entry" role="group" aria-label="' + esc(k) + '">' +
+                    '<div class="log-label">' + esc(k) + '</div>' +
+                    '<div class="log-text" title="' + esc(val) + '">' + esc(val) + '</div></div>';
                 }
               }
             } else {
@@ -2336,8 +2499,9 @@ var Pages = {
                 if (!logs.hasOwnProperty(key)) continue;
                 var v = logs[key];
                 if (typeof v !== 'string') v = Array.isArray(v) ? (v[0] || '') : String(v);
-                html += '<div class="log-entry"><span class="log-label">' + esc(key) + '</span>' +
-                  '<span class="log-text" title="' + esc(v) + '">' + esc(v) + '</span></div>';
+                html += '<div class="log-entry" role="group" aria-label="' + esc(key) + '">' +
+                  '<div class="log-label">' + esc(key) + '</div>' +
+                  '<div class="log-text" title="' + esc(v) + '">' + esc(v) + '</div></div>';
               }
             }
             if (html) { $lb.html(html); }
@@ -2489,19 +2653,21 @@ var Pages = {
       $('#thermo-unit-'+domIdx).text(unit);
     },
 
-    /* --- WiFi signal update --- */
-    _updateWifi: function(domIdx, t) {
+    /* --- WiFi signal update (drives both the bars view and the dBm dial) --- */
+    _updateWifi: function(domIdx, gaugeIdx, t) {
       var $tile = $('[data-tile="'+domIdx+'"]');
       if (!$tile.length) return;
       var isPct = $tile.attr('data-wifi-pct') === '1';
       var raw = parseFloat(t.value) || 0;
       var dbm, pct;
       if (isPct) {
+        /* Driver reported a percentage — derive an approximate dBm for the dial. */
         pct = Math.round(Math.max(0, Math.min(100, raw)));
-        dbm = Math.round(-30 - (100 - pct) * 0.6);
+        dbm = WifiSignal.pctToDbm(pct);
       } else {
+        /* Driver reported dBm (positive magnitude, e.g. 42 => -42 dBm). */
         dbm = -Math.abs(raw);
-        pct = Math.round(Math.max(0, Math.min(100, (dbm + 90) / 60 * 100)));
+        pct = WifiSignal.dbmToPct(dbm);
       }
       var arcs = pct >= 66 ? 3 : pct >= 33 ? 2 : pct > 0 ? 1 : 0;
       /* Single color: red(0) → yellow(60) → green(120) mapped to 0-100% */
@@ -2518,6 +2684,9 @@ var Pages = {
       if (arcs > 0) { $dot.attr('fill', col); } else { $dot.removeAttr('fill'); }
       $('#wifi-pct-'+domIdx).text(pct + '%');
       $('#wifi-dbm-'+domIdx).text(dbm + ' dBm');
+      /* Dial view: move the needle and show dBm in the LCD */
+      var g = (gaugeIdx != null) ? S.gauges[gaugeIdx] : null;
+      if (g && g.set) { g.set(dbm); if (g.setLabel) g.setLabel(dbm + ''); }
     },
 
     /* --- Weather tile helpers --- */
@@ -2606,10 +2775,20 @@ var Pages = {
       $p.find('.status-section-title').each(function() {
         var key = $(this).text().trim();
         var shouldOpen = (key in saved) ? saved[key] : true;
-        $(this).toggleClass('open', shouldOpen);
-        $(this).next('.status-kv').toggle(shouldOpen);
+        $(this).toggleClass('open', shouldOpen).attr('aria-expanded', shouldOpen ? 'true' : 'false');
+        $(this).closest('.status-section').children('.status-kv').toggle(shouldOpen);
       });
       UI.bindSectionToggles($p);
+    },
+    /* Reference "now" for charts. Log timestamps are written in the monitor
+     * (Pi) wall-clock and parsed as browser-local, so anchor the axis window to
+     * the monitor's current time. Otherwise a browser in a different timezone
+     * than the generator shifts the data off the window. Falls back to the
+     * browser clock until monitor time is known. */
+    _chartNow: function() {
+      var snap = this._interpolate(this._monitorSnap);
+      if (snap && snap.date && !isNaN(snap.date.getTime())) return snap.date;
+      return new Date();
     },
     _initChart: function() {
       var ctx = document.getElementById('pwr-chart');
@@ -2707,7 +2886,7 @@ var Pages = {
     _loadChart: function(mins) {
       var data = S.chartRawData;
       if (!S.chart || !data) return;
-      var now = new Date();
+      var now = this._chartNow();
       var cutoff = new Date(now.getTime() - mins * 60000);
       var points = [];
       for (var i = 0; i < data.length; i++) {
@@ -2749,23 +2928,23 @@ var Pages = {
     _tempChartTileHtml: function(sensorName) {
       var key = 'tempchart-' + Store.slugify(sensorName);
       var chartSize = Store.getChartSize() || 'xl';
-      return '<div class="tile tile-chart tile-' + esc(chartSize) + '" data-tile="' + esc(key) + '" data-size="' + esc(chartSize) + '" data-sensor="' + esc(sensorName) + '" draggable="false">' +
-        '<button class="tile-hide-btn" title="Hide tile">&times;</button>' +
-        '<div class="tile-drag-handle" title="Drag to reorder">' + icon('monitor') + '</div>' +
-        '<div class="tile-edit-controls" style="display:none"><div class="tile-ctrl-row">' +
+      return '<div class="tile tile-chart tile-' + esc(chartSize) + '" role="listitem" data-tile="' + esc(key) + '" data-size="' + esc(chartSize) + '" data-sensor="' + esc(sensorName) + '" draggable="false">' +
+        '<button type="button" class="tile-hide-btn" title="Hide tile" tabindex="-1" aria-hidden="true">&times;</button>' +
+        '<div class="tile-drag-handle" title="Drag to reorder" aria-hidden="true">' + icon('monitor') + '</div>' +
+        '<div class="tile-edit-controls" style="display:none" aria-hidden="true"><div class="tile-ctrl-row">' +
         '<span class="tile-ctrl-label">Width</span>' +
-        '<button class="chart-size-btn' + (chartSize==='md'?' active':'') + '" data-csz="md" title="1 column">1</button>' +
-        '<button class="chart-size-btn' + (chartSize==='lg'?' active':'') + '" data-csz="lg" title="2 columns">2</button>' +
-        '<button class="chart-size-btn' + (chartSize==='xl'?' active':'') + '" data-csz="xl" title="3 columns">3</button>' +
+        '<button type="button" class="chart-size-btn' + (chartSize==='md'?' active':'') + '" data-csz="md" title="1 column" tabindex="-1">1</button>' +
+        '<button type="button" class="chart-size-btn' + (chartSize==='lg'?' active':'') + '" data-csz="lg" title="2 columns" tabindex="-1">2</button>' +
+        '<button type="button" class="chart-size-btn' + (chartSize==='xl'?' active':'') + '" data-csz="xl" title="3 columns" tabindex="-1">3</button>' +
         '</div></div>' +
-        '<div class="tile-title">' + esc(sensorName) + '</div>' +
-        '<div class="chart-wrap"><canvas id="temp-chart-' + esc(Store.slugify(sensorName)) + '"></canvas></div>' +
-        '<div class="chart-controls">' +
-        '<button class="chart-btn" data-mins="60" data-sensor="' + esc(sensorName) + '">1h</button>' +
-        '<button class="chart-btn" data-mins="360" data-sensor="' + esc(sensorName) + '">6h</button>' +
-        '<button class="chart-btn active" data-mins="1440" data-sensor="' + esc(sensorName) + '">24h</button>' +
-        '<button class="chart-btn" data-mins="10080" data-sensor="' + esc(sensorName) + '">7d</button>' +
-        '<button class="chart-btn" data-mins="43200" data-sensor="' + esc(sensorName) + '">30d</button>' +
+        '<h2 class="tile-title">' + esc(sensorName) + '</h2>' +
+        '<div class="chart-wrap" aria-hidden="true"><canvas id="temp-chart-' + esc(Store.slugify(sensorName)) + '"></canvas></div>' +
+        '<div class="chart-controls" aria-label="Chart time range">' +
+        '<button type="button" class="chart-btn" data-mins="60" data-sensor="' + esc(sensorName) + '">1h</button>' +
+        '<button type="button" class="chart-btn" data-mins="360" data-sensor="' + esc(sensorName) + '">6h</button>' +
+        '<button type="button" class="chart-btn active" data-mins="1440" data-sensor="' + esc(sensorName) + '">24h</button>' +
+        '<button type="button" class="chart-btn" data-mins="10080" data-sensor="' + esc(sensorName) + '">7d</button>' +
+        '<button type="button" class="chart-btn" data-mins="43200" data-sensor="' + esc(sensorName) + '">30d</button>' +
         '</div></div>';
     },
 
@@ -2868,7 +3047,7 @@ var Pages = {
       var entry = this._tempCharts[sensorName];
       if (!entry || !entry.chart) return;
       if (!parsed) { this._fetchTempChartData(sensorName, mins); return; }
-      var now = new Date();
+      var now = this._chartNow();
       var cutoff = new Date(now.getTime() - mins * 60000);
       var points = [];
       for (var i = 0; i < parsed.length; i++) {
@@ -3132,22 +3311,24 @@ var Pages = {
       var h = '<div class="page-title">' + icon('maintenance') + ' Maintenance</div>';
 
       /* ── Generator Control ── */
-      if (info.RemoteCommands) {
+      if (info.RemoteCommands || info.RemoteButtons || info.ResetAlarms || info.AckAlarms) {
         h += '<div class="card mb-2"><div class="card-header">' + icon('power') + ' Generator Control</div><div class="card-body">';
         h += '<div id="sw-state" class="maint-switch-state mb-2">' +
           '<span class="kv-key">Current Switch Position</span> ' +
           '<span class="maint-sw-badge">' + esc(S.switchState) + '</span></div>';
 
         /* Generator actions */
-        h += '<div class="maint-cmd-section">' +
-          '<div class="maint-cmd-label">Generator Actions</div>' +
-          '<p class="form-hint" style="margin:0 0 8px">Start or stop the generator. Starting with transfer powers your house from the generator.</p>' +
-          '<div class="btn-group flex-wrap">';
-        if (info.RemoteTransfer)
-          h += '<button class="btn btn-success btn-sm" data-cmd="starttransfer">'+btnIcon('play')+' Start + Transfer</button>';
-        h += '<button class="btn btn-primary btn-sm" data-cmd="start">'+btnIcon('play')+' Start (No Transfer)</button>' +
-          '<button class="btn btn-danger btn-sm" data-cmd="stop">'+btnIcon('stop')+' Stop Generator</button>' +
-          '</div></div>';
+        if (info.RemoteCommands) {
+          h += '<div class="maint-cmd-section">' +
+            '<div class="maint-cmd-label">Generator Actions</div>' +
+            '<p class="form-hint" style="margin:0 0 8px">Start or stop the generator. Starting with transfer powers your house from the generator.</p>' +
+            '<div class="btn-group flex-wrap">';
+          if (info.RemoteTransfer)
+            h += '<button class="btn btn-success btn-sm" data-cmd="starttransfer">'+btnIcon('play')+' Start + Transfer</button>';
+          h += '<button class="btn btn-primary btn-sm" data-cmd="start">'+btnIcon('play')+' Start (No Transfer)</button>' +
+            '<button class="btn btn-danger btn-sm" data-cmd="stop">'+btnIcon('stop')+' Stop Generator</button>' +
+            '</div></div>';
+        }
 
         /* Switch position */
         if (info.RemoteButtons) {
@@ -3216,16 +3397,29 @@ var Pages = {
       if (info.buttons && info.buttons.length) {
         h += '<div class="card mb-2"><div class="card-header">' + icon('cpu') + ' Custom Commands</div><div class="card-body">';
         info.buttons.forEach(function(b, idx) {
-          var hasInputs = b.command_sequence && b.command_sequence.some(function(c){ return !!c.input_title; });
-          h += '<div class="custom-cmd-row mb-2">';
+          var inputs = (b.command_sequence || []).filter(function(c){ return !!c.input_title; });
+          var hasInputs = inputs.length > 0;
+          h += '<div class="custom-cmd-group mb-2">';
+          h += '<div class="custom-cmd-row">';
           h += '<button class="btn btn-outline btn-sm custom-btn" data-bi="'+idx+'">' + esc(b.title) + '</button>';
           if (hasInputs) {
             b.command_sequence.forEach(function(c, ci) {
               if (!c.input_title) return;
               h += ' <input type="text" class="input input-sm custom-cmd-input" id="cmd-input-'+idx+'-'+ci+'"' +
                 ' placeholder="' + esc(c.input_title) + '"' +
-                (c.tooltip ? ' title="' + esc(c.tooltip) + '"' : '') +
                 ' style="width:140px;display:inline-block">';
+            });
+          }
+          h += '</div>';
+          /* Tooltips shown inline (like the Settings page) instead of as hover popups.
+             A button-level tooltip (same level as onewordcommand) describes the whole
+             command; each command_sequence input may also define its own tooltip. */
+          if (b.tooltip) h += '<div class="form-hint">' + esc(b.tooltip) + '</div>';
+          if (hasInputs) {
+            b.command_sequence.forEach(function(c) {
+              if (!c.input_title || !c.tooltip) return;
+              var prefix = inputs.length > 1 ? esc(c.input_title) + ': ' : '';
+              h += '<div class="form-hint">' + prefix + esc(c.tooltip) + '</div>';
             });
           }
           h += '</div>';
@@ -3363,10 +3557,11 @@ var Pages = {
       });
       if (flat.length) {
         h += '<div class="card mb-2"><div class="card-header">' + icon('about') + ' Generator Info</div><div class="card-body">';
+        var flatRows = '';
         flat.forEach(function(f) {
-          h += '<div class="kv-row"><span class="kv-key">'+esc(f.key)+'</span><span class="kv-val">'+esc(f.val!=null?f.val:'--')+'</span></div>';
+          flatRows += UI.kvRow(f.key, f.val);
         });
-        h += '</div></div>';
+        h += UI.kvDl(flatRows) + '</div></div>';
       }
       var exHtml = '';
       function _collectExKv(items) {
@@ -3380,7 +3575,7 @@ var Pages = {
                 /* Skip "Exercise Time" — already shown formatted in #ex-info */
                 var kl = k.toLowerCase();
                 if (kl === 'exercise time' || kl === 'exercise frequency') continue;
-                exHtml += '<div class="kv-row"><span class="kv-key">'+esc(k)+'</span><span class="kv-val">'+esc(item[k]!=null?item[k]:'--')+'</span></div>';
+                exHtml += UI.kvRow(k, item[k]);
               }
             }
           }
@@ -3394,19 +3589,20 @@ var Pages = {
           return;
         }
         h += '<div class="card mb-2"><div class="card-header">' + icon('maintenance') + ' '+esc(s.name)+'</div><div class="card-body">';
+        var subRows = '';
         if (Array.isArray(s.items)) {
           s.items.forEach(function(item) {
             if (item && typeof item === 'object') {
               for (var k in item) {
                 if (item.hasOwnProperty(k))
-                  h += '<div class="kv-row"><span class="kv-key">'+esc(k)+'</span><span class="kv-val">'+esc(item[k]!=null?item[k]:'--')+'</span></div>';
+                  subRows += UI.kvRow(k, item[k]);
               }
             }
           });
         }
-        h += '</div></div>';
+        h += UI.kvDl(subRows) + '</div></div>';
       });
-      if (exHtml) $('#ex-data').html(exHtml);
+      if (exHtml) $('#ex-data').html(UI.kvDl(exHtml));
       $('#maint-data').html(h);
     },
     update: function(data) {
@@ -3454,28 +3650,41 @@ var Pages = {
       var h = '';
       if (flat.length) {
         h += '<div class="card mb-2"><div class="card-header">' + icon('outage') + ' Outage Status</div><div class="card-body">';
+        var flatRows = '';
         flat.forEach(function(f) {
           var cls = '';
           var kl = f.key.toLowerCase();
           if (kl === 'system in outage') cls = (String(f.val).toLowerCase() === 'yes') ? ' mon-val-warn' : ' mon-val-ok';
-          h += '<div class="kv-row"><span class="kv-key">'+esc(f.key)+'</span><span class="kv-val'+cls+'">'+esc(f.val!=null?f.val:'--')+'</span></div>';
+          flatRows += UI.kvRow(f.key, f.val, cls);
         });
-        h += '</div></div>';
+        h += UI.kvDl(flatRows) + '</div></div>';
       }
       subs.forEach(function(s) {
         var ic = secIcons[s.name] || '';
-        h += '<div class="card mb-2"><div class="card-header">' + ic + ' ' + esc(s.name) + '</div><div class="card-body">';
+        var secId = 'outage-h-' + String(s.name).toLowerCase().replace(/[^a-z0-9]+/g, '-');
+        h += '<div class="card mb-2"><h2 class="card-header" id="' + secId + '">' + ic + ' ' + esc(s.name) + '</h2><div class="card-body">';
         var items = Array.isArray(s.items) ? s.items : [s.items];
+        var strItems = [], kvRows = '';
         items.forEach(function(item) {
           if (typeof item === 'string') {
-            h += '<div class="kv-row" style="padding:4px 0;font-size:.85rem">' + esc(item) + '</div>';
+            strItems.push(item);
           } else if (item && typeof item === 'object') {
             for (var k in item) {
               if (item.hasOwnProperty(k))
-                h += '<div class="kv-row"><span class="kv-key">'+esc(k)+'</span><span class="kv-val">'+esc(item[k]!=null?item[k]:'--')+'</span></div>';
+                kvRows += UI.kvRow(k, item[k]);
             }
           }
         });
+        if (strItems.length) {
+          /* One list for log lines — same pattern as Logs / dashboard tiles */
+          h += '<ul class="logs-list" role="list" aria-labelledby="' + secId + '">';
+          strItems.forEach(function(line) {
+            h += '<li class="logs-entry" role="listitem"><span class="logs-entry-msg">' +
+              esc(line) + '</span></li>';
+          });
+          h += '</ul>';
+        }
+        h += UI.kvDl(kvRows);
         h += '</div></div>';
       });
       $('#outage-data').html(h || '<div class="text-muted text-center">No outage data.</div>');
@@ -3485,10 +3694,12 @@ var Pages = {
   /* ========== LOGS ========== */
   logs: {
     cmd: 'logs_json',
+    _entryDateRe: /^\s*(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})\s+(\d{1,2}:\d{2}:\d{2})\s+(.*)$/,
     render: function($c) {
       $c.html(
-        '<div class="page-title">' + icon('logs') + ' Logs</div>' +
-        '<div id="cal-heatmap" class="cal-heatmap-wrap"></div>' +
+        '<h1 class="page-title">' + icon('logs') + ' Logs</h1>' +
+        /* Decorative day map — same data is in the lists below; hide from AT */
+        '<div id="cal-heatmap" class="cal-heatmap-wrap" aria-hidden="true"></div>' +
         '<div id="logs-data"><div class="text-muted text-center">Loading…</div></div>'
       );
       API.get('logs_json').done(function(d){ Pages.logs.update(d); });
@@ -3509,6 +3720,12 @@ var Pages = {
       }
       return out;
     },
+    /** Split "MM/DD/YY HH:MM:SS message" into {time, msg} for clearer AT reading */
+    _splitLogEntry: function(raw) {
+      var m = Pages.logs._entryDateRe.exec(String(raw || ''));
+      if (!m) return { time: '', msg: String(raw || '') };
+      return { time: m[1] + '/' + m[2] + '/' + m[3] + ' ' + m[4], msg: (m[5] || '').trim() };
+    },
     _renderLogCards: function(d) {
       if (!d || !d.Logs) { UI.refreshJsonPanel($('#logs-data'), d); return; }
       var logs = this._flattenLogs(d.Logs);
@@ -3522,13 +3739,31 @@ var Pages = {
         if (!logs.hasOwnProperty(logName)) continue;
         var entries = logs[logName];
         var ic = secIcons[logName] || icon('logs');
-        h += '<div class="card mb-2"><div class="card-header">' + ic + ' ' + esc(logName);
-        if (Array.isArray(entries)) h += ' <span class="badge" style="font-size:.7rem;margin-left:6px;background:var(--bg-3);padding:2px 8px;border-radius:10px">' + entries.length + '</span>';
-        h += '</div><div class="card-body">';
+        var count = Array.isArray(entries) ? entries.length : 0;
+        var secId = 'logs-h-' + String(logName).toLowerCase().replace(/[^a-z0-9]+/g, '-');
+        /* Use div+h2 (not labelled <section>) so AT gets one list without
+           region enter/exit between every entry — same pattern as dashboard tiles. */
+        h += '<div class="card mb-2">' +
+          '<h2 class="card-header" id="' + secId + '">' +
+          ic + ' ' + esc(logName);
+        if (count) {
+          h += ' <span class="badge logs-count-badge" aria-hidden="true">' + count + '</span>' +
+            '<span class="sr-only">, ' + count + ' ' + (count === 1 ? 'entry' : 'entries') + '</span>';
+        }
+        h += '</h2><div class="card-body">';
         if (Array.isArray(entries) && entries.length) {
+          /* role="list" restores list semantics when list-style is removed (WebKit) */
+          h += '<ul class="logs-list" role="list" aria-labelledby="' + secId + '">';
           entries.forEach(function(e) {
-            h += '<div class="kv-row" style="padding:4px 0;font-size:.85rem">' + esc(e) + '</div>';
+            var parts = Pages.logs._splitLogEntry(e);
+            /* Inner flex wrapper — display:flex on <li> can break list continuity in AT */
+            h += '<li class="logs-entry" role="listitem"><div class="logs-entry-row">';
+            if (parts.time) {
+              h += '<time class="logs-entry-time">' + esc(parts.time) + '</time> ';
+            }
+            h += '<span class="logs-entry-msg">' + esc(parts.msg || e) + '</span></div></li>';
           });
+          h += '</ul>';
         } else {
           h += '<div class="text-muted">No entries.</div>';
         }
@@ -3551,7 +3786,7 @@ var Pages = {
         if (n.indexOf('service') !== -1) return 2;
         return 1;
       };
-      var dateRe = /^\s*(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})\s+(\d{1,2}:\d{2}:\d{2})\s+(.*)$/;
+      var dateRe = Pages.logs._entryDateRe;
 
       var flatLogs = Pages.logs._flattenLogs(d.Logs);
       for (var logName in flatLogs) {
@@ -3690,7 +3925,7 @@ var Pages = {
       var H = TOP + days * STEP + BOTTOM_LABEL + 2;
 
       var html = '<svg class="cal-heatmap-svg" viewBox="0 0 ' + W + ' ' + H +
-                 '" width="100%" preserveAspectRatio="xMidYMin meet" role="img" aria-label="Log activity heatmap">';
+                 '" width="100%" preserveAspectRatio="xMidYMin meet" focusable="false">';
 
       /* Day-of-week labels (left side) */
       var dayLabels = ['','Mon','','Wed','','Fri','','Sun'];
@@ -3716,8 +3951,8 @@ var Pages = {
       html += '<div class="cal-legend">';
       if (totalMonths < 12) {
         html += '<span class="cal-page-nav">' +
-          '<button class="cal-pg-btn" id="cal-pg-prev" title="Older"' + (page >= maxPages - 1 ? ' disabled' : '') + '>&lsaquo;</button>' +
-          '<button class="cal-pg-btn" id="cal-pg-next" title="Newer"' + (page <= 0 ? ' disabled' : '') + '>&rsaquo;</button></span>';
+          '<button type="button" class="cal-pg-btn" id="cal-pg-prev" tabindex="-1" title="Older"' + (page >= maxPages - 1 ? ' disabled' : '') + '>&lsaquo;</button>' +
+          '<button type="button" class="cal-pg-btn" id="cal-pg-next" tabindex="-1" title="Newer"' + (page <= 0 ? ' disabled' : '') + '>&rsaquo;</button></span>';
       }
       html += '<span class="cal-legend-label">Less</span>' +
         '<span class="cal-cell-preview cal-lv0"></span>' +
@@ -3791,6 +4026,10 @@ var Pages = {
           h += '<div class="card mb-2"><div class="card-header">' + ic + ' ' + esc(secName) + '</div><div class="card-body">';
 
           if (Array.isArray(items)) {
+            var rows = '', body = '';
+            function flushRows() {
+              if (rows) { body += UI.kvDl(rows); rows = ''; }
+            }
             items.forEach(function(item) {
               if (item && typeof item === 'object') {
                 for (var k in item) {
@@ -3798,15 +4037,17 @@ var Pages = {
                   var v = item[k];
                   if (v && typeof v === 'object') {
                     /* nested sub-section */
-                    h += '<div class="mon-subsec"><div class="mon-subsec-title">' + esc(k) + '</div>';
-                    h += Pages.monitor._renderObj(v);
-                    h += '</div>';
+                    flushRows();
+                    body += '<div class="mon-subsec"><div class="mon-subsec-title">' + esc(k) + '</div>' +
+                      Pages.monitor._renderObj(v) + '</div>';
                   } else {
-                    h += Pages.monitor._kvRow(k, v);
+                    rows += Pages.monitor._kvRow(k, v);
                   }
                 }
               }
             });
+            flushRows();
+            h += body;
           } else if (items && typeof items === 'object') {
             /* External Data: object with named sub-sections */
             h += '<div class="ext-data-grid">';
@@ -3824,7 +4065,10 @@ var Pages = {
       $('#mon-data').html(h);
     },
     _renderObj: function(obj) {
-      var h = '';
+      var h = '', pending = '';
+      function flush() {
+        if (pending) { h += UI.kvDl(pending); pending = ''; }
+      }
       if (Array.isArray(obj)) {
         obj.forEach(function(item) {
           if (item && typeof item === 'object') {
@@ -3832,14 +4076,15 @@ var Pages = {
               if (!item.hasOwnProperty(k)) continue;
               var v = item[k];
               if (v && typeof v === 'object') {
+                flush();
                 h += '<div class="ext-data-nested"><div class="ext-data-nested-hdr">' + esc(k) + '</div>' +
                   Pages.monitor._renderObj(v) + '</div>';
               } else {
-                h += Pages.monitor._kvRow(k, v);
+                pending += Pages.monitor._kvRow(k, v);
               }
             }
           } else {
-            h += Pages.monitor._kvRow('#' + obj.indexOf(item), item);
+            pending += Pages.monitor._kvRow('#' + obj.indexOf(item), item);
           }
         });
       } else if (obj && typeof obj === 'object') {
@@ -3847,13 +4092,15 @@ var Pages = {
           if (!obj.hasOwnProperty(k)) continue;
           var v = obj[k];
           if (v && typeof v === 'object') {
+            flush();
             h += '<div class="ext-data-nested"><div class="ext-data-nested-hdr">' + esc(k) + '</div>' +
               Pages.monitor._renderObj(v) + '</div>';
           } else {
-            h += Pages.monitor._kvRow(k, v);
+            pending += Pages.monitor._kvRow(k, v);
           }
         }
       }
+      flush();
       return h;
     },
     _kvRow: function(k, v) {
@@ -3875,8 +4122,7 @@ var Pages = {
         var vl = val.toLowerCase();
         cls = (vl === 'ok' || vl === 'sleeping' || vl === 'mppt') ? ' mon-val-ok' : ' mon-val-warn';
       }
-      return '<div class="kv-row"><span class="kv-key">' + esc(k) +
-        '</span><span class="kv-val' + cls + '">' + esc(val) + '</span></div>';
+      return UI.kvRow(k, val, cls);
     }
   },
 
@@ -3909,7 +4155,7 @@ var Pages = {
           '<div class="notif-cats">';
         CATS.forEach(function(cat) {
           var checked = r.cats.indexOf(cat) >= 0 ? ' checked' : '';
-          c += '<label class="notif-cat-label"><input type="checkbox" class="n-cat" data-cat="'+esc(cat)+'"'+checked+'>' +
+          c += '<label class="notif-cat-label"><input type="checkbox" class="n-cat sr-only" data-cat="'+esc(cat)+'"'+checked+'>' +
             '<span class="notif-cat-chip">'+(CAT_LABELS[cat]||cat)+'</span></label>';
         });
         c += '</div></div>';
@@ -4200,6 +4446,7 @@ var Pages = {
       usehttps:'security', usemfa:'security', mfa_url:'security', mfa_enrolled:'security', email_configured:'security',
       remember_me_days:'security', mfa_trust_days:'security', mfa_trust_extend:'security',
       cert_mode:'security', cert_info:'security', certfile:'security', keyfile:'security',
+      allow_iframe:'security',
       port:'comms', use_serial_tcp:'comms', serial_tcp_address:'comms',
       serial_tcp_port:'comms', modbus_tcp:'comms', serial_tcp_keepalive:'comms',
       disableweather:'weather', minimumweatherinfo:'weather', metricweather:'system',
@@ -4220,7 +4467,7 @@ var Pages = {
       { id:'system',   label:'Monitor',        icon:'cpu' }
     ],
     render: function($c) {
-      $c.html('<div class="page-title">'+icon('settings')+' Settings</div>' +
+      $c.html('<h1 class="page-title">'+icon('settings')+' Settings</h1>' +
         '<div id="set-wrap"><div class="text-muted text-center">Loading\u2026</div></div>');
       var self = this;
       API.get('settings', 12000).done(function(d){
@@ -4241,7 +4488,10 @@ var Pages = {
       var devMode = Store.get('devMode', false);
       var showModbus = Store.get('showModbus', true);
 
-      /* Dependent field rules: parent checkbox → child fields hidden when condition met.
+      function _setTabId(cat) { return 'set-tab-' + cat; }
+      function _setPanelId(cat) { return 'set-panel-' + cat; }
+
+      /* Dependent field rules:
          NOTE: 'disable*' keys are displayed INVERTED (checked = enabled).
          So 'when:true' means 'when the original config value is true (=disabled)',
          which in the inverted UI means 'when checkbox is UNchecked'. We flip the
@@ -4252,7 +4502,7 @@ var Pages = {
         usemfa:          { disables:['mfa_url','mfa_trust_extend','mfa_trust_days'], when:false },
         mfa_trust_extend:{ disables:['mfa_trust_days'], when:false },
         use_serial_tcp:  { disables:['serial_tcp_address','serial_tcp_port','modbus_tcp','serial_tcp_keepalive'], when:false },
-        disablesmtp:     { disables:['email_account','email_pw','sender_account','sender_name','smtp_server','smtp_port','ssl_enabled','tls_disable','smtpauth_disable'], when:false },
+        disablesmtp:     { disables:['email_account','email_pw','sender_account','sender_name','smtp_server','smtp_port','ssl_enabled','tls_disable','use_html','smtpauth_disable'], when:false },
         disableimap:     { disables:['imap_server','readonlyemailcommands','incoming_mail_folder','processed_mail_folder'], when:false },
         disableoutagecheck: { disables:[], when:false },
         disablepowerlog:    { disables:[], when:false }
@@ -4263,7 +4513,7 @@ var Pages = {
         { id:'email-smtp', toggle:'disablesmtp', label:'Outbound Email (SMTP)',
           icon:'upload',
           desc:'Configure an SMTP server to send email alerts and notifications.',
-          fields:['email_account','email_pw','sender_account','sender_name','smtp_server','smtp_port','ssl_enabled','smtpauth_disable','tls_disable'] },
+          fields:['email_account','email_pw','sender_account','sender_name','smtp_server','smtp_port','ssl_enabled','smtpauth_disable','tls_disable','use_html'] },
         { id:'email-imap', toggle:'disableimap', label:'Inbound Email Commands (IMAP)',
           icon:'download',
           desc:'Allow genmon to receive and process commands via email.',
@@ -4314,36 +4564,43 @@ var Pages = {
       var h = '<div class="set-toolbar">' +
         '<div class="set-search-wrap">' +
         btnIcon('search', 16) +
-        '<input class="set-search-input" id="set-search" type="text" placeholder="Search settings\u2026"></div>' +
+        '<input class="set-search-input" id="set-search" type="search" aria-label="Search settings" placeholder="Search settings\u2026"></div>' +
         '<button class="set-adv-btn'+(devMode?' set-adv-on':'')+' " id="set-adv-toggle">' +
         btnIcon('advanced', 14) + ' Advanced</button></div>';
 
       /* --- Category tabs (with icons) --- */
-      h += '<div class="set-cats" id="set-cats">';
+      h += '<div class="set-cats" id="set-cats" role="tablist" aria-label="Settings sections">';
       CATS.forEach(function(c, i) {
         var cnt = buckets[c.id] ? buckets[c.id].length : 0;
-        h += '<button class="set-cat'+(i===0?' active':'')+'" data-cat="'+c.id+'">' +
+        var isActive = (i === 0);
+        h += '<button class="set-cat'+(isActive?' active':'')+'" role="tab" id="'+_setTabId(c.id)+'" data-cat="'+c.id+'"' +
+          ' aria-selected="'+(isActive?'true':'false')+'" aria-controls="'+_setPanelId(c.id)+'" tabindex="'+(isActive?'0':'-1')+'">' +
           icon(c.icon) + '<span class="set-cat-label">'+esc(c.label)+'</span>' +
           '<span class="set-cat-count">'+cnt+'</span></button>';
         if (c.id === 'email') {
-          h += '<button class="set-cat" data-cat="__notifications__">' +
+          h += '<button class="set-cat" role="tab" id="'+_setTabId('__notifications__')+'" data-cat="__notifications__"' +
+            ' aria-selected="false" aria-controls="'+_setPanelId('__notifications__')+'" tabindex="-1">' +
             icon('notifications') + '<span class="set-cat-label">Notifications</span></button>';
         }
       });
       /* Advanced & System Actions tabs (hidden unless dev mode) */
-      h += '<button class="set-cat set-cat-adv'+(devMode?'':' hidden')+'" data-cat="__advanced__">' +
+      h += '<button class="set-cat set-cat-adv'+(devMode?'':' hidden')+'" role="tab" id="'+_setTabId('__advanced__')+'" data-cat="__advanced__"' +
+        ' aria-selected="false" aria-controls="'+_setPanelId('__advanced__')+'" tabindex="-1">' +
         icon('advanced') + '<span class="set-cat-label">Advanced</span></button>';
-      h += '<button class="set-cat set-cat-adv'+(devMode?'':' hidden')+'" data-cat="__sysactions__">' +
+      h += '<button class="set-cat set-cat-adv'+(devMode?'':' hidden')+'" role="tab" id="'+_setTabId('__sysactions__')+'" data-cat="__sysactions__"' +
+        ' aria-selected="false" aria-controls="'+_setPanelId('__sysactions__')+'" tabindex="-1">' +
         icon('power') + '<span class="set-cat-label">System Actions</span></button>';
       h += '</div>';
 
       /* --- Setting panels --- */
       h += '<div id="set-panels">';
       CATS.forEach(function(c, i) {
-        h += '<div class="set-panel'+(i===0?' active':'')+'" data-cat="'+c.id+'">';
+        var isActive = (i === 0);
+        h += '<div class="set-panel'+(isActive?' active':'')+'" role="tabpanel" id="'+_setPanelId(c.id)+'" data-cat="'+c.id+'"' +
+          (isActive?'':' hidden')+' aria-labelledby="'+_setTabId(c.id)+'">';
         h += '<div class="set-panel-hdr">' +
           '<div class="set-panel-icon">'+icon(c.icon)+'</div>' +
-          '<div><div class="set-panel-title">'+esc(c.label)+'</div>' +
+          '<div><h2 class="set-panel-title">'+esc(c.label)+'</h2>' +
           '<div class="set-panel-sub">'+buckets[c.id].length+' settings</div></div></div>';
         h += '<div class="set-panel-fields">';
         if (c.id === 'security') {
@@ -4352,6 +4609,8 @@ var Pages = {
           (buckets[c.id] || []).forEach(function(s) { secMap[s.key] = s; });
           /* Port field */
           if (secMap['http_port']) h += UI.formField('http_port', secMap['http_port'].def, secMap['http_port'].def[3]);
+          /* iframe embedding toggle (applies over http and https) */
+          if (secMap['allow_iframe']) h += UI.formField('allow_iframe', secMap['allow_iframe'].def, secMap['allow_iframe'].def[3]);
           /* Master toggle: usehttps */
           if (secMap['usehttps']) h += UI.formField('usehttps', secMap['usehttps'].def, secMap['usehttps'].def[3]);
           h += '<div class="set-url-warn" id="sec-url-warn" style="display:none">' +
@@ -4365,7 +4624,7 @@ var Pages = {
           SEC_SUBS.forEach(function(sub) {
             h += '<div class="set-sec-group" id="'+sub.id+'">' +
               '<div class="set-sec-group-hdr">' + icon(sub.icon) +
-              '<div><div class="set-sec-group-title">'+esc(sub.label)+'</div>' +
+              '<div><h3 class="set-sec-group-title">'+esc(sub.label)+'</h3>' +
               '<div class="set-sec-group-desc">'+sub.desc+'</div></div></div>';
             h += '<div class="set-sec-group-fields">';
             if (sub.id === 'sec-mfa') {
@@ -4634,7 +4893,7 @@ var Pages = {
             if (emlMap[sub.toggle]) h += UI.formField(sub.toggle, emlMap[sub.toggle].def, emlMap[sub.toggle].def[3]);
             h += '<div class="set-sec-group" id="'+sub.id+'">' +
               '<div class="set-sec-group-hdr">' + icon(sub.icon) +
-              '<div><div class="set-sec-group-title">'+esc(sub.label)+'</div>' +
+              '<div><h3 class="set-sec-group-title">'+esc(sub.label)+'</h3>' +
               '<div class="set-sec-group-desc">'+sub.desc+'</div></div></div>';
             h += '<div class="set-sec-group-fields">';
             sub.fields.forEach(function(fk) {
@@ -4668,10 +4927,10 @@ var Pages = {
 
       /* --- Advanced settings panel (hidden unless dev mode) --- */
       var advData = self._advData;
-      h += '<div class="set-panel set-panel-adv'+(devMode?'':' hidden')+'" data-cat="__advanced__">';
+      h += '<div class="set-panel set-panel-adv'+(devMode?'':' hidden')+'" role="tabpanel" id="'+_setPanelId('__advanced__')+'" data-cat="__advanced__" hidden aria-labelledby="'+_setTabId('__advanced__')+'">';
       h += '<div class="set-panel-hdr">' +
         '<div class="set-panel-icon">'+icon('advanced')+'</div>' +
-        '<div><div class="set-panel-title">Advanced Settings</div>' +
+        '<div><h2 class="set-panel-title">Advanced Settings</h2>' +
         '<div class="set-panel-sub">For experienced users only</div></div></div>';
       h += '<div class="badge badge-warning mb-2">'+btnIcon('warning',14)+' Changing these settings may break your system. Proceed with caution.</div>';
       if (advData && typeof advData === 'object') {
@@ -4688,10 +4947,10 @@ var Pages = {
       h += '</div>';
 
       /* --- System Actions panel (hidden unless dev mode) --- */
-      h += '<div class="set-panel set-panel-adv'+(devMode?'':' hidden')+'" data-cat="__sysactions__">';
+      h += '<div class="set-panel set-panel-adv'+(devMode?'':' hidden')+'" role="tabpanel" id="'+_setPanelId('__sysactions__')+'" data-cat="__sysactions__" hidden aria-labelledby="'+_setTabId('__sysactions__')+'">';
       h += '<div class="set-panel-hdr">' +
         '<div class="set-panel-icon">'+icon('power')+'</div>' +
-        '<div><div class="set-panel-title">System Actions</div>' +
+        '<div><h2 class="set-panel-title">System Actions</h2>' +
         '<div class="set-panel-sub">Control the running system</div></div></div>';
       h += '<div class="badge badge-warning mb-2">'+btnIcon('warning',14)+' These actions affect the running system.</div>';
       h += '<div class="btn-group flex-wrap" style="gap:8px;margin-top:12px">' +
@@ -4714,17 +4973,17 @@ var Pages = {
           '<div class="notif-cats">';
         NOTIF_CATS.forEach(function(cat) {
           var checked = r.cats.indexOf(cat) >= 0 ? ' checked' : '';
-          c += '<label class="notif-cat-label"><input type="checkbox" class="n-cat" data-cat="'+esc(cat)+'"'+checked+'>' +
+          c += '<label class="notif-cat-label"><input type="checkbox" class="n-cat sr-only" data-cat="'+esc(cat)+'"'+checked+'>' +
             '<span class="notif-cat-chip">'+(NOTIF_CAT_LABELS[cat]||cat)+'</span></label>';
         });
         c += '</div></div>';
         return c;
       }
 
-      h += '<div class="set-panel" data-cat="__notifications__">';
+      h += '<div class="set-panel" role="tabpanel" id="'+_setPanelId('__notifications__')+'" data-cat="__notifications__" hidden aria-labelledby="'+_setTabId('__notifications__')+'">';
       h += '<div class="set-panel-hdr">' +
         '<div class="set-panel-icon">'+icon('notifications')+'</div>' +
-        '<div><div class="set-panel-title">Notifications</div>' +
+        '<div><h2 class="set-panel-title">Notifications</h2>' +
         '<div class="set-panel-sub">Email recipients &amp; categories</div></div></div>';
       h += '<div class="card"><div class="card-header">' + icon('mail') + ' Email Recipients</div><div class="card-body">';
       h += '<div id="notif-list" class="notif-list">';
@@ -4750,6 +5009,24 @@ var Pages = {
 
       var $w = $('#set-wrap').html(h);
 
+      function _syncSetTabs(activeCat) {
+        $w.find('.set-cat').each(function() {
+          var $t = $(this);
+          var on = $t.data('cat') === activeCat;
+          $t.attr('aria-selected', on ? 'true' : 'false');
+          $t.attr('tabindex', on ? '0' : '-1');
+          $t.toggleClass('active', on);
+        });
+        $w.find('.set-panel').each(function() {
+          var $p = $(this);
+          if ($p.hasClass('hidden')) return;
+          var on = $p.data('cat') === activeCat;
+          $p.toggleClass('active', on);
+          if (on) $p.removeAttr('hidden');
+          else if (!$p.hasClass('set-search-mode')) $p.attr('hidden', '');
+        });
+      }
+
       /* --- Tab switching (with dirty guard) --- */
       $w.on('click', '.set-cat', function() {
         var $btn = $(this);
@@ -4757,11 +5034,10 @@ var Pages = {
         var activeCat = $('.set-cat.active').data('cat');
         if (activeCat === cat) return;
         function doSwitch() {
-          $('.set-cat').removeClass('active'); $btn.addClass('active');
           $('#set-search-results').hide();
-          $('.set-panel').removeClass('active');
-          $('.set-panel[data-cat="'+cat+'"]').addClass('active');
           $('#set-search').val('');
+          $('#set-cats').show().removeAttr('aria-hidden');
+          _syncSetTabs(cat);
         }
         if (_isTabDirty(activeCat)) {
           Modal.confirm('Unsaved Changes',
@@ -4772,32 +5048,49 @@ var Pages = {
         doSwitch();
       });
 
+      /* Arrow-key navigation between settings tabs */
+      $w.on('keydown', '.set-cat', function(e) {
+        var $tabs = $w.find('.set-cat:visible');
+        var idx = $tabs.index(this);
+        var next = -1;
+        if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = (idx + 1) % $tabs.length;
+        else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = (idx - 1 + $tabs.length) % $tabs.length;
+        else if (e.key === 'Home') next = 0;
+        else if (e.key === 'End') next = $tabs.length - 1;
+        else return;
+        e.preventDefault();
+        $tabs.eq(next).focus().trigger('click');
+      });
+
       /* --- Search filter (improved: hides non-matching fields and empty panels) --- */
       $('#set-search').on('input', function() {
         var q = $(this).val().toLowerCase();
         if (!q) {
           /* Restore normal tab view */
-          $('#set-panels .set-panel').removeClass('active set-search-mode');
+          $('#set-panels .set-panel').removeClass('set-search-mode');
           $('.setting-field').show();
-          var active = $('.set-cat.active').data('cat');
-          $('.set-panel[data-cat="'+active+'"]').addClass('active');
-          $('#set-cats').show();
+          $('#set-cats').show().removeAttr('aria-hidden');
+          _syncSetTabs($('.set-cat.active').data('cat') || 'general');
           return;
         }
         /* Hide category tabs, show all panels in search mode */
-        $('#set-cats').hide();
+        $('#set-cats').hide().attr('aria-hidden', 'true');
         $('#set-panels .set-panel').each(function() {
           var $panel = $(this);
           /* Skip hidden panels (e.g. Advanced when dev mode is off) */
-          if ($panel.hasClass('hidden')) { $panel.removeClass('active set-search-mode'); return; }
+          if ($panel.hasClass('hidden')) { $panel.removeClass('active set-search-mode').attr('hidden', ''); return; }
           var hasMatch = false;
           $panel.find('.setting-field').each(function() {
             var match = ($(this).data('label') || '').indexOf(q) >= 0;
             $(this).toggle(match);
             if (match) hasMatch = true;
           });
-          $panel.toggleClass('active set-search-mode', hasMatch);
-          if (!hasMatch) $panel.removeClass('active');
+          $panel.toggleClass('set-search-mode', hasMatch);
+          if (hasMatch) {
+            $panel.addClass('active').removeAttr('hidden');
+          } else {
+            $panel.removeClass('active set-search-mode').attr('hidden', '');
+          }
         });
       });
 
@@ -4825,8 +5118,7 @@ var Pages = {
           $btn.removeClass('set-adv-on');
           $('.set-cat-adv, .set-panel-adv').removeClass('active').addClass('hidden');
           var $first = $('.set-cat:not(.set-cat-adv)').first();
-          $first.addClass('active');
-          $('.set-panel[data-cat="'+$first.data('cat')+'"]').addClass('active');
+          _syncSetTabs($first.data('cat'));
         } else {
           Modal.confirm('Enable Advanced Settings',
             Modal.html('<strong>'+btnIcon('warning',16)+' Warning:</strong> Advanced settings are intended for experienced users. ' +
@@ -5336,7 +5628,8 @@ var Pages = {
             password:        $w.find('#f_email_pw').val(),
             use_ssl:        ($w.find('#f_ssl_enabled').is(':checked')),
             tls_disable:    ($w.find('#f_tls_disable').is(':checked')),
-            smtpauth_disable:($w.find('#f_smtpauth_disable').is(':checked'))
+            smtpauth_disable:($w.find('#f_smtpauth_disable').is(':checked')),
+            use_html:       ($w.find('#f_use_html').is(':checked'))
           });
           API.get('test_email?test_email=' + encodeURIComponent(payload), 15000)
             .done(function(r) {
@@ -5896,12 +6189,14 @@ var Pages = {
 
       /* --- Software & Info card --- */
       h += '<div class="card mb-2"><div class="card-header">' + icon('cpu') + ' Software</div><div class="card-body">';
+      var softRows = '';
       [['Genmon Version', info.version],
        ['Python', info.python], ['Platform', info.platform],
        ['OS Architecture', (info.os_bits||'')], ['Install Date', info.install]
       ].forEach(function(f){
-        if (f[1]) h += '<div class="kv-row"><span class="kv-key">'+esc(f[0])+'</span><span class="kv-val">'+esc(f[1])+'</span></div>';
+        if (f[1]) softRows += UI.kvRow(f[0], f[1]);
       });
+      h += UI.kvDl(softRows);
       h += '<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">' +
         '<button class="btn btn-outline btn-sm" id="a-changelog">'+btnIcon('logs')+' View Changelog</button>';
       if (S.writeAccess || !info.LoginActive)
@@ -5910,15 +6205,16 @@ var Pages = {
 
       /* --- Generator card --- */
       h += '<div class="card mb-2"><div class="card-header">' + icon('zap') + ' Generator</div><div class="card-body">';
+      var genRows = '';
       [['Model', info.model||info.Controller], ['Controller', info.Controller],
        ['Firmware', info.Firmware], ['Hardware', info.Hardware],
        ['Fuel Type', info.fueltype], ['Nominal kW', info.nominalKW],
        ['Nominal RPM', info.nominalRPM], ['Frequency', info.nominalfrequency],
        ['Phase', info.phase]
       ].forEach(function(f){
-        h += '<div class="kv-row"><span class="kv-key">'+esc(f[0])+'</span><span class="kv-val">'+esc(f[1]||'--')+'</span></div>';
+        genRows += UI.kvRow(f[0], f[1] || '--');
       });
-      h += '</div></div>';
+      h += UI.kvDl(genRows) + '</div></div>';
 
       /* --- Request Help card --- */
       h += '<div class="card mb-2"><div class="card-header">' + icon('mail') + ' Request Help</div><div class="card-body">' +
@@ -6157,7 +6453,8 @@ var Pages = {
     _showChangelog: function(){
       var url = 'https://raw.githubusercontent.com/jgyates/genmon/master/changelog.md';
       Modal.show('Changelog', Modal.html(
-        '<div class="changelog-body" style="padding:8px;font-size:.85rem;color:var(--text-1)">' +
+        '<div class="changelog-body" role="region" aria-label="Changelog" ' +
+        'style="padding:8px;font-size:.85rem;color:var(--text-1)">' +
         '<div class="text-muted text-center">Loading changelog…</div></div>'), []);
       $.get(url).done(function(md){
         var html = md

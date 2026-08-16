@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import itertools
+import struct
 import copy
 import re
 
@@ -351,6 +352,7 @@ class GeneratorController(MySupport):
         self.Threads["ProcessThread"].Start()
 
         if self.EnableDebug:  # for debugging registers
+            self.LogDebug("STARTING REGISTER DEBUG THREAD")
             self.Threads["DebugThread"] = MyThread(self.DebugThread, Name="DebugThread", start = False)
             self.Threads["DebugThread"].Start()
 
@@ -615,14 +617,7 @@ class GeneratorController(MySupport):
             return
         time.sleep(0.25)
 
-        if (
-            not self.ControllerSelected == None
-            or not len(self.ControllerSelected)
-            or self.ControllerSelected == "generac_evo_nexus"
-        ):
-            MaxReg = 0x400
-        else:
-            MaxReg = 0x2000
+        MaxReg = 0x3000
         self.InitCompleteEvent.wait()
 
         if self.IsStopping:
@@ -681,7 +676,7 @@ class GeneratorController(MySupport):
                                 self.GetEngineState(),
                             )
                         )
-                        RegistersUnderTest[Register] = Value  # update the value
+                        RegistersUnderTest[Register] = NewValue  # update the value
 
                 msgbody = "\n"
                 try:
@@ -1225,18 +1220,22 @@ class GeneratorController(MySupport):
                         Data = []
                         for item in command["value"]:
                             if isinstance(item, str):
-                                Data.append(int(item, 16))
+                                item = int(item, 16)
+                                item = self.ProcessBitModifiers(command, item)
+                                Data.append(item)
                             elif isinstance(item, int):
+                                item = self.ProcessBitModifiers(command, item)
                                 Data.append(item)
                             else:
                                 self.LogDebug("Error in ExecuteCommandSequence: invalid type if value list")
                                 return "Command not found."
                         self.LogDebug("Write List: len: " + str(int(len(Data)  // 2)) + " : "  + self.LogHexList(Data, prefix=command["reg"], nolog = True))
                         self.ModBus.ProcessWriteTransaction(command["reg"], len(Data) // 2, Data, IsCoil = IsCoil, IsSingle = IsSingle)
-
+                        self.DelayBetweenFrames(ignoreerror = True)
                     elif isinstance(command["value"], str):
                         # only supports single word writes
                         value = int(command["value"], 16)
+                        value = self.ProcessBitModifiers(command, value)
                         LowByte = value & 0x00FF
                         HighByte = (value >> 8) & 0x00ff
                         Data = []
@@ -1244,9 +1243,11 @@ class GeneratorController(MySupport):
                         Data.append(LowByte)  
                         self.LogDebug("Write Str: len: "+ str(int(len(Data)  // 2)) + " : " + command["reg"] + ": "+ ("%04x %04x" % (HighByte, LowByte)))
                         self.ModBus.ProcessWriteTransaction(command["reg"], len(Data) // 2, Data, IsCoil = IsCoil, IsSingle = IsSingle)
+                        self.DelayBetweenFrames(ignoreerror = True)
                     elif isinstance(command["value"], int):
                         # only supports single word writes
                         value = command["value"]
+                        value = self.ProcessBitModifiers(command, value)
                         LowByte = value & 0x00FF
                         HighByte = (value >> 8) & 0x00ff
                         Data = []
@@ -1254,6 +1255,7 @@ class GeneratorController(MySupport):
                         Data.append(LowByte)  
                         self.LogDebug("Write Int: len: "+ str(int(len(Data)  // 2)) + " : " + command["reg"]+ ": "+ ("%04x %04x" % (HighByte, LowByte)))
                         self.ModBus.ProcessWriteTransaction(command["reg"], len(Data) // 2, Data, IsCoil = IsCoil, IsSingle = IsSingle)
+                        self.DelayBetweenFrames(ignoreerror = True)
                     else:
                         self.LogDebug("Error in ExecuteCommandSequence: invalid value type")
                         return "Command not found."
@@ -1263,6 +1265,53 @@ class GeneratorController(MySupport):
             self.LogDebug(str(command_sequence))
             return "Error in ExecuteCommandSequence"
         return "The command was sent to the controller."
+
+    # ------------ GeneratorController:ProcessBitModifiers ----------------------
+    def ProcessBitModifiers(self, entry, value, ReturnFloat = False):
+        try:
+            orignialvalue = value
+
+            if "swapwords32" in entry.keys():
+                # change from 01234567 to 456701234
+                if entry["swapwords32"] == True:
+                    value = self.SwapWords32(value)
+            if "shiftright" in entry.keys():
+                value = value >> int(entry["shiftright"])
+            if "shiftleft" in entry.keys():
+                value = value << int(entry["shiftleft"])
+            if "ieee754" in entry.keys() and ReturnFloat:
+                # Use this for testing: https://www.h-schmidt.net/FloatConverter/IEEE754.html
+                if entry["ieee754"].lower() == "half":  # 16 bits
+                    value = float(struct.unpack('f', struct.pack('H', int(value)))[0])
+                elif entry["ieee754"].lower() == "single":  # 32 bits
+                    value = float(struct.unpack('f', struct.pack('I', int(value)))[0])
+                elif entry["ieee754"].lower() == "double":  # 64 bits
+                    value = float(struct.unpack('f', struct.pack('Q', int(value)))[0])
+                else:
+                    self.LogError("Error converting IEEE754 floating point: invalid ieee754 type: " + str(entry))
+                if math.isnan(value):
+                    self.LogDebug("Error: value is not an IEEE floating point number: " + ("%x" % orignialvalue) + " : " + str(entry["title"]) + ": " + str(value))
+                    return 0.0
+            if "multiplier" in entry.keys():
+                if ReturnFloat:
+                    value = float(value * float(entry["multiplier"]))
+                else:
+                    value = int(value * float(entry["multiplier"]))
+            return value
+        except Exception as e1:
+            self.LogErrorLine("Error in ProcessBitModifiers: " + str(e1) + ": " + str(entry["title"]))
+            return value
+
+    # --------------------GeneratorController:DelayBetweenFrames----------------
+    def DelayBetweenFrames(self, ignoreerror = False):
+        # add a delay between modbus requests
+        try:
+            if self.ModBus.BetweenFrameDelay <= 0:
+                return
+            
+            self.WaitForExit(timeout = self.ModBus.BetweenFrameDelay, ignoreerror=ignoreerror)
+        except Exception as e1:
+            self.LogErrorLine(f"Error in DelayBetween Frames: {e1}")
 
     # ------------ GeneratorController::GetStartInfo ----------------------------
     # return a dictionary with startup info for the gui
@@ -1365,7 +1414,7 @@ class GeneratorController(MySupport):
         except Exception as e1:
             self.LogErrorLine("Error in DisplayRegisters: " + str(e1))
 
-    # ------------ Evolution:GetMessageText ------------------------------------
+    # ------------ GeneratorController:GetMessageText ------------------------------------
     def GetMessageText(self):
         try:
             msgtext = self.DisplayStatus()
@@ -1607,6 +1656,7 @@ class GeneratorController(MySupport):
             Data.append(HighByte)
             Data.append(LowByte)
             RegValue = self.ModBus.ProcessWriteTransaction(Register, len(Data) // 2, Data)
+            self.DelayBetweenFrames(ignoreerror = True)
 
             if RegValue == "":
                 msgbody = "OK"
@@ -3146,7 +3196,7 @@ class GeneratorController(MySupport):
             self.LogErrorLine("Error in GetEstimatedFuelInTank: " + str(e1))
             return DefaultReturn
 
-    # ------------ Evolution:GetFuelSensor --------------------------------------
+    # ------------ GeneratorController:GetFuelSensor ---------------------------
     def GetFuelSensor(self, ReturnInt=False):
         return None
 
@@ -3592,7 +3642,7 @@ class GeneratorController(MySupport):
             return None
         return None
 
-    # ------------ Evolution:ConvertExternalData --------------------------------
+    # ------------ GeneratorController:ConvertExternalData ---------------------
     def ConvertExternalData(self, request="current", voltage=None, ReturnFloat=False):
 
         try:
@@ -3723,7 +3773,7 @@ class GeneratorController(MySupport):
             self.LogErrorLine("Error in ConvertExternalData: " + str(e1))
             return None
 
-    # ------------ Evolution:ReturnFormat ---------------------------------------
+    # ------------ GeneratorController:ReturnFormat ----------------------------
     def ReturnFormat(sefl, value, units, ReturnFloat):
 
         if ReturnFloat:
