@@ -234,6 +234,7 @@ if __name__ == "__main__":
             loglocation=loglocation,
             console=console,
             config=SMS.GetConfig(),
+            configfilepath=ConfigFilePath,
         )
 
         SMSInfo = SMS.GetInfo(ReturnString=True)

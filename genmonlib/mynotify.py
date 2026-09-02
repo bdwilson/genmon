@@ -9,11 +9,13 @@
 # -------------------------------------------------------------------------------
 import collections
 import json
+import os
 import threading
 import time
 
 from genmonlib.myclient import ClientInterface
 from genmonlib.mycommon import MyCommon
+from genmonlib.myconfig import MyConfig
 from genmonlib.mylog import SetupLogger
 from genmonlib.mythread import MyThread
 from genmonlib.program_defaults import ProgramDefaults
@@ -49,6 +51,7 @@ class GenNotify(MyCommon):
         notify_sw_update=True,
         notify_pi_state=True,
         config=None,
+        configfilepath=None,
     ):
 
         super(GenNotify, self).__init__()
@@ -70,8 +73,34 @@ class GenNotify(MyCommon):
         self.notify_pi_state = notify_pi_state
         self.config = config
 
+        # When True, the first poll after start-up only records the current
+        # state as the baseline and does not fire any callbacks, so a reboot
+        # (e.g. triggered by a WiFi drop) doesn't send a notification for
+        # state that never actually changed. Read from genmon.conf (global
+        # setting, not per add-on) since it applies to every notification
+        # add-on using GenNotify.
+        self.suppress_initial_notify = True
+        self._first_poll_done = False
+
         self.log = log
         self.console = console
+
+        try:
+            GenMonConfig = MyConfig(
+                filename=os.path.join(
+                    configfilepath if configfilepath else ProgramDefaults.ConfPath,
+                    "genmon.conf",
+                ),
+                section="GenMon",
+                log=log,
+            )
+            self.suppress_initial_notify = GenMonConfig.ReadValue(
+                "suppress_initial_notify", return_type=bool, default=True
+            )
+        except Exception as e1:
+            self.LogErrorLine(
+                "Error reading suppress_initial_notify setting: " + str(e1)
+            )
 
         try:
 
@@ -164,12 +193,30 @@ class GenNotify(MyCommon):
 
                 self.LastEvent = data
 
-                self.CallEventHandler(True)  # begin new event
+                if self.suppress_initial_notify and not self._first_poll_done:
+                    self.console.info(
+                        "Suppressing initial startup notification for: <"
+                        + str(data)
+                        + ">"
+                    )
+                else:
+                    self.CallEventHandler(True)  # begin new event
+
+                self._first_poll_done = True
 
                 time.sleep(3)
             except Exception as e1:
                 self.LogErrorLine("Error in mynotify:MainPollingThread: " + str(e1))
                 time.sleep(3)
+
+    # ----------  GenNotify::MaybeProcessEventData -------------------------------
+    def MaybeProcessEventData(self, name, eventdata, lastvalue):
+        # Suppress the very first observation after start-up (when enabled)
+        # so a restart alone doesn't fire a notification for state that
+        # never actually changed. The caller still records the baseline.
+        if self.suppress_initial_notify and not self._first_poll_done:
+            return
+        self.ProcessEventData(name, eventdata, lastvalue)
 
     # ----------  GenNotify::GetOutageState -------------------------------------
     def GetOutageState(self):
@@ -195,7 +242,7 @@ class GenNotify(MyCommon):
 
         if OutageState != None:
             if self.notify_outage:
-                self.ProcessEventData("OUTAGE", OutageState, self.LastOutageStatus)
+                self.MaybeProcessEventData("OUTAGE", OutageState, self.LastOutageStatus)
                 self.LastOutageStatus = OutageState
 
         return OutageState
@@ -217,7 +264,7 @@ class GenNotify(MyCommon):
                         else:
                             UpdateAvailable = False
                         if self.notify_sw_update:
-                            self.ProcessEventData(
+                            self.MaybeProcessEventData(
                                 "SOFTWAREUPDATE",
                                 UpdateAvailable,
                                 self.LastSoftwareUpdateStatus,
@@ -225,7 +272,7 @@ class GenNotify(MyCommon):
                             self.LastSoftwareUpdateStatus = UpdateAvailable
                     if key == "Monitor Health":
                         if self.notify_info:
-                            self.ProcessEventData(
+                            self.MaybeProcessEventData(
                                 "SYSTEMHEALTH", value, self.LastSystemHealth
                             )
                             self.LastSystemHealth = value
@@ -252,7 +299,7 @@ class GenNotify(MyCommon):
                 if PiStats == "":
                     PiStats = "OK"
                 if PiPresent:
-                    self.ProcessEventData("PISTATE", PiStats, self.LastPiState)
+                    self.MaybeProcessEventData("PISTATE", PiStats, self.LastPiState)
                     self.LastPiState = PiStats
         except Exception as e1:
             # The system does no support outage tracking (i.e. H-100)
@@ -277,7 +324,7 @@ class GenNotify(MyCommon):
                         else:
                             FuelOK = False
                         if self.notify_warning:
-                            self.ProcessEventData(
+                            self.MaybeProcessEventData(
                                 "FUELWARNING", FuelOK, self.LastFuelWarningStatus
                             )
                             self.LastFuelWarningStatus = FuelOK

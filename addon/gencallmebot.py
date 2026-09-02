@@ -143,6 +143,7 @@ class GenCallMeBot(MySupport):
                 loglocation=self.loglocation,
                 console=self.console,
                 config=self.config,
+                configfilepath=self.ConfigFilePath,
             )
 
             signal.signal(signal.SIGTERM, self.SignalClose)

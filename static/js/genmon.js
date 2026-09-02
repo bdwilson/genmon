@@ -4456,7 +4456,7 @@ var Pages = {
       favicon:'system', system_theme: 'system',
       autofeedback:'system', update_check:'system', synctime:'system',
       syncdst:'system', disableoutagecheck:'system', optimizeforslowercpu:'system',
-      disablepowerlog:'system', displayunknown:'system'
+      disablepowerlog:'system', displayunknown:'system', suppress_initial_notify:'system'
     },
     _CATEGORIES: [
       { id:'general',  label:'Generator',      icon:'zap' },
