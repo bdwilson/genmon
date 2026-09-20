@@ -607,6 +607,20 @@ class GenHALink(MySupport):
             if not self.IncludeMonitorStats:
                 self.LogDebug("Filtering monitor stats from state")
                 state.pop("Monitor", None)
+            if self.BlackList:
+                flat = self._flatten_state(state)
+                blacklisted_paths = [
+                    path
+                    for path in flat
+                    if any(bl.lower() in path.lower() for bl in self.BlackList)
+                ]
+                if blacklisted_paths:
+                    self.LogDebug(
+                        "Filtering %d blacklisted path(s) from state"
+                        % len(blacklisted_paths)
+                    )
+                for path in blacklisted_paths:
+                    self._remove_state_path(state, path)
         except Exception as e1:
             self.LogErrorLine("Error in _filter_state: " + str(e1))
 
