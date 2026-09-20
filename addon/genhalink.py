@@ -660,6 +660,8 @@ class GenHALink(MySupport):
         backwards compatibility, and the value is normalized to include the
         degree symbol so Home Assistant's temperature device_class accepts it.
         """
+        if not self.IncludeMonitorStats:
+            return
         try:
             gui = state.get("gui_status", {})
             temp_str = None
@@ -702,6 +704,8 @@ class GenHALink(MySupport):
         Reads /proc/meminfo and os.statvfs on the Pi. If any call fails the
         metric is silently omitted. Values are cached for 60 seconds.
         """
+        if not self.IncludeMonitorStats:
+            return
         try:
             if not MyPlatform.IsOSLinux():
                 return
