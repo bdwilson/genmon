@@ -3137,7 +3137,7 @@ def GetAddOns():
                 "blacklist", return_type=str, default="Tiles"
             ),
             "string",
-            "Comma-separated keywords to exclude from the API. Matches any data path containing the keyword (case-insensitive). Top-level sections: Status, Maintenance, Outage, Monitor, Tiles. Examples: 'Tiles' (UI tiles), 'Weather' (weather data), 'Platform Stats' (CPU/memory/network diagnostics that change on nearly every poll), 'Last Log Entries' (log snippets). You can also target specific values like 'CPU Temperature' or 'WLAN Signal Level'. Excluding noisy diagnostic fields here reduces the number of events Hubitat receives.",
+            "Comma-separated keywords to exclude from the API, matching any data path containing the keyword (case-insensitive). For the noisy diagnostics that dominate the Hubitat event count (CPU temperature/usage, memory, disk, WiFi signal), use the 'Include Monitor Stats' toggle instead; for outside temperature and conditions, use 'Include Weather'. Use this field for individual values those toggles don't cover, such as 'Battery Voltage' or 'Battery Charger Current', or to drop a single field while keeping the rest of the monitor stats. The default 'Tiles' excludes the web UI's tile data, which Hubitat does not use.",
             bounds="",
             display_name="Excluded Data Paths",
         )
