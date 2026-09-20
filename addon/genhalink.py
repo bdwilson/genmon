@@ -537,6 +537,14 @@ class GenHALink(MySupport):
         # Inject platform resource metrics (memory, disk) on Raspberry Pi
         self._inject_platform_resources(new_state)
 
+        # Re-apply the blacklist now that CPU Temperature / Memory Utilization
+        # / Disk Utilization / WLAN Signal Percent have been injected, so a
+        # user can exclude those specific fields by name even though they
+        # didn't exist yet for the first _filter_state() pass above. "Tiles"
+        # is exempt here so the default blacklist doesn't strip the CPU
+        # Temperature value that was deliberately injected after that pass.
+        self._apply_blacklist(new_state, exempt_keywords=["tiles"])
+
         # Discover dynamic sensors
         self._discover_dynamic_sensors(new_state)
 
@@ -607,22 +615,39 @@ class GenHALink(MySupport):
             if not self.IncludeMonitorStats:
                 self.LogDebug("Filtering monitor stats from state")
                 state.pop("Monitor", None)
-            if self.BlackList:
-                flat = self._flatten_state(state)
-                blacklisted_paths = [
-                    path
-                    for path in flat
-                    if any(bl.lower() in path.lower() for bl in self.BlackList)
-                ]
-                if blacklisted_paths:
-                    self.LogDebug(
-                        "Filtering %d blacklisted path(s) from state"
-                        % len(blacklisted_paths)
-                    )
-                for path in blacklisted_paths:
-                    self._remove_state_path(state, path)
+            self._apply_blacklist(state)
         except Exception as e1:
             self.LogErrorLine("Error in _filter_state: " + str(e1))
+
+    def _apply_blacklist(self, state, exempt_keywords=None):
+        """Remove any state path matching a blacklist keyword, in place.
+
+        exempt_keywords lets a caller ignore specific blacklist entries for
+        one pass. Used to keep the CPU Temperature value injected after the
+        first _filter_state() call (under a Tiles/ path) from being removed
+        by the default "Tiles" blacklist entry, while a user-specified
+        keyword that actually names the field (e.g. "CPU Temperature")
+        still removes it.
+        """
+        if not self.BlackList:
+            return
+        exempt = set(k.lower() for k in (exempt_keywords or []))
+        active = [bl for bl in self.BlackList if bl.lower() not in exempt]
+        if not active:
+            return
+        flat = self._flatten_state(state)
+        blacklisted_paths = [
+            path
+            for path in flat
+            if any(bl.lower() in path.lower() for bl in active)
+        ]
+        if blacklisted_paths:
+            self.LogDebug(
+                "Filtering %d blacklisted path(s) from state"
+                % len(blacklisted_paths)
+            )
+        for path in blacklisted_paths:
+            self._remove_state_path(state, path)
 
     def _inject_cpu_temp(self, state):
         """Extract CPU temperature from gui_status and inject into the
